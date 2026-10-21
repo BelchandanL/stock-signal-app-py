@@ -244,4 +244,65 @@ class ChartVisualizer:
         direction_color = "Green" if setup["direction"] == "BUY" else ("Red" if setup["direction"] == "SELL" else "Orange")
         fig.update_layout(
             title=dict(
-                text=f"<b>
+                text=f"<b>{ticker.upper()}</b> Candlestick Analysis & 3-Day Forecast | Signal: <span style='color:{direction_color}'>{setup['direction']}</span>",
+                x=0.01,
+            ),
+            xaxis_title="Date",
+            yaxis_title="Price ($)",
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=650,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+
+        fig.show()
+
+
+def main():
+    """Application entry point."""
+    print("=" * 60)
+    print("      QUANTITATIVE CANDLESTICK ANALYZER & FORECASTER      ")
+    print("=" * 60)
+
+    # Prompt user for stock ticker
+    user_input = input("Enter Stock Ticker (e.g., AAPL, NVDA, TSLA): ").strip()
+    if not user_input:
+        user_input = "AAPL"
+        print("No input provided. Defaulting to AAPL.")
+
+    ticker = user_input.upper()
+
+    # 1. Fetch Historical Data (Last 60 Days to ensure 30-day window after SMA20 warmup)
+    raw_df = StockDataFetcher.get_data(ticker, period="60d")
+
+    # 2. Compute Technical Indicators
+    df = TechnicalAnalyzer.compute_indicators(raw_df)
+
+    # 3. Generate Trade Setup
+    setup = TechnicalAnalyzer.generate_trade_setup(df)
+
+    # 4. Generate 3-Day Future Forecast Candles
+    forecast_df = ForecastEngine.generate_forecast_candles(df, setup["direction"], days=3)
+
+    # 5. Console Output
+    print("\n" + "=" * 60)
+    print(f" TRADE SETUP SUMMARY: {ticker}")
+    print("=" * 60)
+    print(f" Market Direction  : {setup['direction']}")
+    print(f" Current / Entry   : ${setup['entry_price']:.2f}")
+    print(f" Stop Loss (SL)    : ${setup['stop_loss']:.2f}")
+    print(f" Take Profit 1 (T1): ${setup['target_1']:.2f}")
+    print(f" Take Profit 2 (T2): ${setup['target_2']:.2f}")
+    print(f" 14-Day RSI        : {setup['rsi']:.1f}")
+    print("-" * 60)
+    print(" Signal Rationale:")
+    for reason in setup["reasons"]:
+        print(f"  - {reason}")
+    print("=" * 60 + "\n")
+
+    # 6. Plot Interactive Chart
+    ChartVisualizer.plot_chart(df, forecast_df, setup, ticker)
+
+
+if __name__ == "__main__":
+    main()
