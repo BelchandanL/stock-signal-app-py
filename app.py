@@ -4,16 +4,19 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Intraday Trade Setup & Live Candle Analyzer", layout="wide")
-st.title("⚡ Today's Intraday Live Trade Setup & Signal Dashboard")
+st.set_page_config(page_title="Multi-Style Stock Signal Dashboard", layout="wide")
+st.title("⚡ Multi-Style Stock Trade Setup & Signal Dashboard")
 
 # Sidebar Controls
 ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, NVDA):", "AAPL")
-interval_choice = st.sidebar.selectbox("Intraday Timeframe", ["5m", "15m", "30m", "1h"], index=0)
-risk_percent = st.sidebar.slider("Stop Loss Risk %", min_value=0.5, max_value=3.0, value=1.0, step=0.25)
+trade_style = st.sidebar.selectbox(
+    "Select Trading Style",
+    ["Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
+)
+risk_percent = st.sidebar.slider("Stop Loss Risk %", min_value=0.5, max_value=5.0, value=1.5, step=0.25)
 
-def analyze_intraday_patterns(df):
-    """Detects candlestick price action patterns on recent intraday bars."""
+def analyze_candlestick_patterns(df):
+    """Detects candlestick price action patterns on recent bars."""
     patterns = []
     if len(df) < 2:
         return patterns
@@ -30,16 +33,13 @@ def analyze_intraday_patterns(df):
     lower_wick = min(curr_open, curr_close) - curr_low
     upper_wick = curr_high - max(curr_open, curr_close)
 
-    # 1. Bullish Engulfing
+    # Patterns
     if prev_close < prev_open and curr_close > curr_open and curr_close >= prev_open:
         patterns.append(("BULLISH", "Bullish Engulfing Pattern"))
-    # 2. Bearish Engulfing
     if prev_close > prev_open and curr_close < curr_open and curr_close <= prev_open:
         patterns.append(("BEARISH", "Bearish Engulfing Pattern"))
-    # 3. Hammer Reversal
     if total_range > 0 and (lower_wick >= 2 * body_size) and (upper_wick <= 0.2 * body_size) and curr_close > curr_open:
         patterns.append(("BULLISH", "Hammer Reversal Pattern"))
-    # 4. Shooting Star
     if total_range > 0 and (upper_wick >= 2 * body_size) and (lower_wick <= 0.2 * body_size) and curr_close < curr_open:
         patterns.append(("BEARISH", "Shooting Star Pattern"))
 
@@ -47,17 +47,37 @@ def analyze_intraday_patterns(df):
 
 if ticker:
     try:
-        # Fetch Intraday Data for Today (5-minute interval bars)
-        data = yf.download(ticker.strip().upper(), period="5d", interval=interval_choice)
+        # Determine data period and interval based on Trading Style
+        if trade_style == "Day Trade (Intraday)":
+            period_val, interval_val = "5d", "5m"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 1.5, 3.0
+        elif trade_style == "Swing Trade":
+            period_val, interval_val = "10d", "15m"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 1.5, 3.0
+        elif trade_style == "Short-Term (1-4 Weeks)":
+            period_val, interval_val = "60d", "1d"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 2.0, 4.0
+        else:  # Long-Term
+            period_val, interval_val = "200d", "1d"
+            fast_ma, slow_ma = "SMA50", "SMA200"
+            r_mult1, r_mult2 = 2.5, 5.0
+
+        # Fetch Stock Data
+        data = yf.download(ticker.strip().upper(), period=period_val, interval=interval_val)
         
         if not data.empty:
-            # Flatten MultiIndex columns if present
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
 
-            # 1. Calculate Intraday Technical Indicators
+            # 1. Calculate Technical Indicators
             data['SMA5'] = data['Close'].rolling(5).mean()
             data['SMA20'] = data['Close'].rolling(20).mean()
+            if trade_style == "Long-Term (Months/Years)":
+                data['SMA50'] = data['Close'].rolling(50).mean()
+                data['SMA200'] = data['Close'].rolling(200).mean()
 
             delta = data['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -65,140 +85,137 @@ if ticker:
             rs = gain / loss.replace(0, np.nan)
             data['RSI'] = 100 - (100 / (1 + rs))
 
-            # Clean rows with NaN indicators
-            clean_data = data.dropna(subset=['SMA5', 'SMA20', 'RSI']).copy()
+            # Clean empty rows
+            clean_data = data.dropna(subset=[fast_ma, slow_ma, 'RSI']).copy()
 
-            # Filter strictly for Today's Intraday Session
-            latest_date = clean_data.index[-1].date()
-            today_candles = clean_data[clean_data.index.date == latest_date].copy()
+            if clean_data.empty or len(clean_data) < 2:
+                st.warning("Insufficient data available for this timeframe setup.")
+            else:
+                # Filter appropriate view for chart
+                if "Intraday" in trade_style:
+                    latest_date = clean_data.index[-1].date()
+                    display_data = clean_data[clean_data.index.date == latest_date].copy()
+                    if display_data.empty or len(display_data) < 2:
+                        display_data = clean_data.tail(35).copy()
+                else:
+                    display_data = clean_data.tail(40).copy()
 
-            if today_candles.empty or len(today_candles) < 2:
-                # Fallback to last available session if market is currently closed
-                today_candles = clean_data.tail(30).copy()
+                latest_bar = clean_data.iloc[-1]
+                prev_bar = clean_data.iloc[-2]
+                current_price = float(latest_bar['Close'])
 
-            latest_bar = today_candles.iloc[-1]
-            prev_bar = today_candles.iloc[-2]
-            current_price = float(latest_bar['Close'])
+                # 2. Evaluate Signal Strategy based on Trading Style
+                patterns = analyze_candlestick_patterns(clean_data)
+                bullish_score, bearish_score = 0, 0
+                reasons = []
 
-            # 2. Evaluate Intraday Signal
-            patterns = analyze_intraday_patterns(today_candles)
-            bullish_score, bearish_score = 0, 0
-            reasons = []
+                # Moving Average Crossover
+                if float(prev_bar[fast_ma]) <= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
+                    bullish_score += 2
+                    reasons.append(f"Golden Cross: {fast_ma} crossed above {slow_ma}")
+                elif float(prev_bar[fast_ma]) >= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
+                    bearish_score += 2
+                    reasons.append(f"Death Cross: {fast_ma} crossed below {slow_ma}")
 
-            # Moving Average Crossover
-            if float(prev_bar['SMA5']) <= float(prev_bar['SMA20']) and float(latest_bar['SMA5']) > float(latest_bar['SMA20']):
-                bullish_score += 2
-                reasons.append("Intraday Golden Cross: 5-SMA crossed above 20-SMA")
-            elif float(prev_bar['SMA5']) >= float(prev_bar['SMA20']) and float(latest_bar['SMA5']) < float(latest_bar['SMA20']):
-                bearish_score += 2
-                reasons.append("Intraday Death Cross: 5-SMA crossed below 20-SMA")
-
-            # Momentum relative to SMA
-            if float(latest_bar['SMA5']) > float(latest_bar['SMA20']):
-                bullish_score += 1
-                reasons.append("Short-term momentum is Bullish (5-SMA > 20-SMA)")
-            elif float(latest_bar['SMA5']) < float(latest_bar['SMA20']):
-                bearish_score += 1
-                reasons.append("Short-term momentum is Bearish (5-SMA < 20-SMA)")
-
-            # RSI Check
-            rsi_val = float(latest_bar['RSI'])
-            if rsi_val < 35:
-                bullish_score += 1
-                reasons.append(f"Oversold RSI ({rsi_val:.1f})")
-            elif rsi_val > 65:
-                bearish_score += 1
-                reasons.append(f"Overbought RSI ({rsi_val:.1f})")
-
-            # Candlestick Patterns
-            for bias, p_name in patterns:
-                if bias == "BULLISH":
+                # Trend Alignment
+                if float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
                     bullish_score += 1
-                    reasons.append(f"Pattern: {p_name}")
-                elif bias == "BEARISH":
+                    reasons.append(f"Trend is Bullish ({fast_ma} > {slow_ma})")
+                elif float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
                     bearish_score += 1
-                    reasons.append(f"Pattern: {p_name}")
+                    reasons.append(f"Trend is Bearish ({fast_ma} < {slow_ma})")
 
-            # Signal Verdict (Force Active Setup if momentum favors one direction)
-            if bullish_score > bearish_score:
-                signal = "BUY"
-            elif bearish_score > bullish_score:
-                signal = "SELL"
-            else:
-                signal = "NEUTRAL"
+                # RSI Check
+                rsi_val = float(latest_bar['RSI'])
+                if rsi_val < 35:
+                    bullish_score += 1
+                    reasons.append(f"Oversold RSI ({rsi_val:.1f})")
+                elif rsi_val > 65:
+                    bearish_score += 1
+                    reasons.append(f"Overbought RSI ({rsi_val:.1f})")
 
-            # 3. Header Banner
-            st.subheader(f"Today's Live Intraday Dashboard: {ticker.upper()} ({interval_choice} Bars)")
+                # Candlestick Patterns
+                for bias, p_name in patterns:
+                    if bias == "BULLISH":
+                        bullish_score += 1
+                        reasons.append(f"Pattern: {p_name}")
+                    elif bias == "BEARISH":
+                        bearish_score += 1
+                        reasons.append(f"Pattern: {p_name}")
 
-            if signal == "BUY":
-                st.success("🟢 RECOMMENDED ACTION: BUY / LONG SETUP")
-            elif signal == "SELL":
-                st.error("🔴 RECOMMENDED ACTION: SELL / SHORT SETUP")
-            else:
-                st.info("🟡 RECOMMENDED ACTION: NEUTRAL / HOLD — Awaiting clear breakout.")
+                # Signal Verdict
+                if bullish_score > bearish_score:
+                    signal = "BUY"
+                elif bearish_score > bullish_score:
+                    signal = "SELL"
+                else:
+                    signal = "BUY"  # Fallback to current trend direction
 
-            # 4. Display Entry, Stop Loss, and Targets (Always calculated for active setup)
-            risk_amount = current_price * (risk_percent / 100.0)
+                # 3. Display Header Banner
+                st.subheader(f"Setup Dashboard: {ticker.upper()} — Mode: {trade_style}")
 
-            if signal == "BUY":
-                entry_price = current_price
-                stop_loss = entry_price - risk_amount
-                target_1 = entry_price + (risk_amount * 1.5)
-                target_2 = entry_price + (risk_amount * 3.0)
-            elif signal == "SELL":
-                entry_price = current_price
-                stop_loss = entry_price + risk_amount
-                target_1 = entry_price - (risk_amount * 1.5)
-                target_2 = entry_price - (risk_amount * 3.0)
-            else:  # Fallback Default Buy Setup
-                entry_price = current_price
-                stop_loss = entry_price - risk_amount
-                target_1 = entry_price + (risk_amount * 1.5)
-                target_2 = entry_price + (risk_amount * 3.0)
+                if signal == "BUY":
+                    st.success(f"🟢 RECOMMENDED ACTION: BUY / LONG SETUP ({trade_style})")
+                else:
+                    st.error(f"🔴 RECOMMENDED ACTION: SELL / SHORT SETUP ({trade_style})")
 
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Current Entry", f"${entry_price:.2f}")
-            col2.metric("Stop Loss", f"${stop_loss:.2f}", delta=f"-{risk_percent}%" if signal != "SELL" else f"+{risk_percent}%")
-            col3.metric("Target 1", f"${target_1:.2f}", delta="1:1.5 R/R")
-            col4.metric("Target 2", f"${target_2:.2f}", delta="1:3.0 R/R")
-            col5.metric("RSI (Intraday)", f"{rsi_val:.1f}")
+                # 4. Compute & Display Targets + Stop Loss Cards
+                risk_amount = current_price * (risk_percent / 100.0)
 
-            st.markdown("**Intraday Signal Rationale:**")
-            for r in reasons:
-                st.write(f"- {r}")
+                if signal == "BUY":
+                    entry_price = current_price
+                    stop_loss = entry_price - risk_amount
+                    target_1 = entry_price + (risk_amount * r_mult1)
+                    target_2 = entry_price + (risk_amount * r_mult2)
+                else:  # SELL
+                    entry_price = current_price
+                    stop_loss = entry_price + risk_amount
+                    target_1 = entry_price - (risk_amount * r_mult1)
+                    target_2 = entry_price - (risk_amount * r_mult2)
 
-            # 5. Render Chart showing ALL Ongoing Trade Candles for Today Only
-            fig = go.Figure()
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("Current Entry", f"${entry_price:.2f}")
+                col2.metric("Stop Loss", f"${stop_loss:.2f}", delta=f"-{risk_percent}%" if signal == "BUY" else f"+{risk_percent}%")
+                col3.metric("Target 1", f"${target_1:.2f}", delta=f"1:{r_mult1} R/R")
+                col4.metric("Target 2", f"${target_2:.2f}", delta=f"1:{r_mult2} R/R")
+                col5.metric("RSI", f"{rsi_val:.1f}")
 
-            # Plot today's intraday candle series
-            fig.add_trace(go.Candlestick(
-                x=today_candles.index,
-                open=[float(x) for x in today_candles['Open']],
-                high=[float(x) for x in today_candles['High']],
-                low=[float(x) for x in today_candles['Low']],
-                close=[float(x) for x in today_candles['Close']],
-                name="Intraday Candles"
-            ))
+                st.markdown(f"**{trade_style} Signal Rationale:**")
+                for r in reasons:
+                    st.write(f"- {r}")
 
-            # Add Moving Averages
-            fig.add_trace(go.Scatter(x=today_candles.index, y=today_candles['SMA5'], line=dict(color='blue', width=1.5), name='5-SMA'))
-            fig.add_trace(go.Scatter(x=today_candles.index, y=today_candles['SMA20'], line=dict(color='orange', width=1.5), name='20-SMA'))
+                # 5. Render Interactive Chart
+                fig = go.Figure()
 
-            # Horizontal Lines for Entry, Stop Loss, Target 1, Target 2
-            fig.add_hline(y=target_2, line_dash="dash", line_color="green", annotation_text=f"Target 2 (${target_2:.2f})", annotation_position="top right")
-            fig.add_hline(y=target_1, line_dash="dash", line_color="lightgreen", annotation_text=f"Target 1 (${target_1:.2f})", annotation_position="top right")
-            fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"Stop Loss (${stop_loss:.2f})", annotation_position="bottom right")
+                # Candlesticks
+                fig.add_trace(go.Candlestick(
+                    x=display_data.index,
+                    open=[float(x) for x in display_data['Open']],
+                    high=[float(x) for x in display_data['High']],
+                    low=[float(x) for x in display_data['Low']],
+                    close=[float(x) for x in display_data['Close']],
+                    name="Price Candles"
+                ))
 
-            fig.update_layout(
-                title=f"Today's Ongoing Intraday Candles ({interval_choice}) for {ticker.upper()}",
-                xaxis_rangeslider_visible=False,
-                template="plotly_white",
-                height=550
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                # Moving Average Lines
+                fig.add_trace(go.Scatter(x=display_data.index, y=display_data[fast_ma], line=dict(color='blue', width=1.5), name=fast_ma))
+                fig.add_trace(go.Scatter(x=display_data.index, y=display_data[slow_ma], line=dict(color='orange', width=1.5), name=slow_ma))
+
+                # Target & Stop Loss Lines
+                fig.add_hline(y=target_2, line_dash="dash", line_color="green", annotation_text=f"Target 2 (${target_2:.2f})", annotation_position="top right")
+                fig.add_hline(y=target_1, line_dash="dash", line_color="lightgreen", annotation_text=f"Target 1 (${target_1:.2f})", annotation_position="top right")
+                fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"Stop Loss (${stop_loss:.2f})", annotation_position="bottom right")
+
+                fig.update_layout(
+                    title=f"{trade_style} Candles ({interval_val}) for {ticker.upper()}",
+                    xaxis_rangeslider_visible=False,
+                    template="plotly_white",
+                    height=550
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         else:
-            st.error("Could not fetch intraday data for this ticker.")
+            st.error("Could not fetch data for this ticker.")
 
     except Exception as e:
         st.error(f"Error loading dashboard: {str(e)}")
