@@ -1,211 +1,308 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
+import sys
+from datetime import datetime, timedelta
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import yfinance as yf
 
-st.set_page_config(page_title="Today's Trade Setup & 7-Day Analyzer", layout="wide")
-st.title("📊 Today's Trade Signal & Candle Analyzer")
 
-# Sidebar Controls
-ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, NVDA):", "AAPL")
-risk_percent = st.sidebar.slider("Stop Loss Risk %", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
+class StockDataFetcher:
+    """Handles fetching historical stock data via yfinance."""
 
-def analyze_7day_patterns(df):
-    """Analyzes recent candles for price action patterns."""
-    patterns = []
-    if len(df) < 2:
-        return patterns
+    @staticmethod
+    def get_data(ticker_symbol: str, period: str = "60d") -> pd.DataFrame:
+        """Fetch daily stock data for the given ticker symbol."""
+        try:
+            print(f"Fetching data for {ticker_symbol.upper()}...")
+            stock = yf.Ticker(ticker_symbol)
+            df = stock.history(period=period, interval="1d")
 
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+            if df.empty:
+                raise ValueError(f"No price data found for symbol '{ticker_symbol}'.")
 
-    curr_open, curr_close = float(curr['Open']), float(curr['Close'])
-    curr_high, curr_low = float(curr['High']), float(curr['Low'])
-    prev_open, prev_close = float(prev['Open']), float(prev['Close'])
+            # Flatten MultiIndex columns if returned by recent yfinance versions
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-    body_size = abs(curr_close - curr_open)
-    total_range = curr_high - curr_low
-    lower_wick = min(curr_open, curr_close) - curr_low
-    upper_wick = curr_high - max(curr_open, curr_close)
+            return df
+        except Exception as e:
+            print(f"Error fetching data: {e}")
+            sys.exit(1)
 
-    # 1. Bullish Engulfing
-    if prev_close < prev_open and curr_close > curr_open and curr_close >= prev_open:
-        patterns.append(("BULLISH", "Bullish Engulfing Pattern"))
-    # 2. Bearish Engulfing
-    if prev_close > prev_open and curr_close < curr_open and curr_close <= prev_open:
-        patterns.append(("BEARISH", "Bearish Engulfing Pattern"))
-    # 3. Hammer
-    if total_range > 0 and (lower_wick >= 2 * body_size) and (upper_wick <= 0.2 * body_size) and curr_close > curr_open:
-        patterns.append(("BULLISH", "Hammer Reversal Pattern"))
-    # 4. Shooting Star
-    if total_range > 0 and (upper_wick >= 2 * body_size) and (lower_wick <= 0.2 * body_size) and curr_close < curr_open:
-        patterns.append(("BEARISH", "Shooting Star Pattern"))
-    # 5. Doji
-    if total_range > 0 and (body_size / total_range) < 0.1:
-        patterns.append(("NEUTRAL", "Doji (Indecision Candle)"))
 
-    return patterns
+class TechnicalAnalyzer:
+    """Computes technical indicators and trading signals."""
 
-if ticker:
-    try:
-        # Fetch 60 days of data to give Moving Averages time to warm up
-        data = yf.download(ticker.strip().upper(), period="60d", interval="1d")
-        
-        if not data.empty:
-            # Flatten MultiIndex columns if returned by yfinance
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
+    @staticmethod
+    def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+        """Calculates 5-day SMA, 20-day SMA, and 14-day RSI."""
+        df = df.copy()
 
-            # 1. Calculate Technical Indicators
-            data['SMA5'] = data['Close'].rolling(5).mean()
-            data['SMA20'] = data['Close'].rolling(20).mean()
+        # Simple Moving Averages
+        df["SMA5"] = df["Close"].rolling(window=5).mean()
+        df["SMA20"] = df["Close"].rolling(window=20).mean()
 
-            delta = data['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = gain / loss.replace(0, np.nan)
-            data['RSI'] = 100 - (100 / (1 + rs))
+        # Relative Strength Index (RSI - 14 Days)
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss.replace(0, np.nan)  # Prevent division by zero
+        df["RSI"] = 100 - (100 / (1 + rs))
 
-            # Drop initial rows where indicators are NaN
-            clean_data = data.dropna(subset=['SMA5', 'SMA20', 'RSI']).copy()
+        return df
 
-            if clean_data.empty or len(clean_data) < 7:
-                st.warning("Insufficient trading data to complete 7-day analysis.")
-            else:
-                # Extract context data
-                last_7_days = clean_data.tail(7)
-                today = clean_data.iloc[-1]
-                prev = clean_data.iloc[-2]
+    @staticmethod
+    def generate_trade_setup(df: pd.DataFrame, risk_percent: float = 2.0) -> dict:
+        """Evaluates trend momentum, generates a Buy/Sell signal, and calculates SL/TP targets."""
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        current_price = float(latest["Close"])
 
-                today_price = float(today['Close'])
-                today_open = float(today['Open'])
-                today_high = float(today['High'])
-                today_low = float(today['Low'])
+        # Signal Scoring
+        bullish_score, bearish_score = 0, 0
+        reasons = []
 
-                # 2. Evaluate Signal
-                patterns = analyze_7day_patterns(last_7_days)
-                bullish_score, bearish_score = 0, 0
-                reasons = []
+        # 1. Moving Average Crossover Logic
+        if prev["SMA5"] <= prev["SMA20"] and latest["SMA5"] > latest["SMA20"]:
+            bullish_score += 2
+            reasons.append("Golden Cross: 5-Day SMA crossed above 20-Day SMA.")
+        elif prev["SMA5"] >= prev["SMA20"] and latest["SMA5"] < latest["SMA20"]:
+            bearish_score += 2
+            reasons.append("Death Cross: 5-Day SMA crossed below 20-Day SMA.")
 
-                # Moving Average Crossover
-                if float(prev['SMA5']) <= float(prev['SMA20']) and float(today['SMA5']) > float(today['SMA20']):
-                    bullish_score += 2
-                    reasons.append("Golden Cross: 5-SMA crossed above 20-SMA")
-                elif float(prev['SMA5']) >= float(prev['SMA20']) and float(today['SMA5']) < float(today['SMA20']):
-                    bearish_score += 2
-                    reasons.append("Death Cross: 5-SMA crossed below 20-SMA")
+        # 2. RSI Overbought / Oversold
+        rsi_val = float(latest["RSI"]) if not pd.isna(latest["RSI"]) else 50.0
+        if rsi_val < 35:
+            bullish_score += 1
+            reasons.append(f"Oversold RSI ({rsi_val:.1f}).")
+        elif rsi_val > 65:
+            bearish_score += 1
+            reasons.append(f"Overbought RSI ({rsi_val:.1f}).")
 
-                # RSI
-                rsi_val = float(today['RSI'])
-                if rsi_val < 35:
-                    bullish_score += 1
-                    reasons.append(f"Oversold RSI ({rsi_val:.1f})")
-                elif rsi_val > 65:
-                    bearish_score += 1
-                    reasons.append(f"Overbought RSI ({rsi_val:.1f})")
+        # 3. 7-Day Breakout Check
+        recent_7d = df.tail(7)
+        seven_day_high = float(recent_7d["High"].iloc[:-1].max())
+        seven_day_low = float(recent_7d["Low"].iloc[:-1].min())
 
-                # 7-Day Breakout Check
-                seven_day_max = float(last_7_days['High'].iloc[:-1].max())
-                seven_day_min = float(last_7_days['Low'].iloc[:-1].min())
+        if current_price > seven_day_high:
+            bullish_score += 1
+            reasons.append("Price breakout above 7-day resistance high.")
+        elif current_price < seven_day_low:
+            bearish_score += 1
+            reasons.append("Price breakdown below 7-day support low.")
 
-                if today_price > seven_day_max:
-                    bullish_score += 1
-                    reasons.append("Breakout: Today's price broke above the 7-day high.")
-                elif today_price < seven_day_min:
-                    bearish_score += 1
-                    reasons.append("Breakdown: Today's price dropped below the 7-day low.")
-
-                # Pattern Additions
-                for bias, p_name in patterns:
-                    if bias == "BULLISH":
-                        bullish_score += 1
-                        reasons.append(f"Pattern: {p_name}")
-                    elif bias == "BEARISH":
-                        bearish_score += 1
-                        reasons.append(f"Pattern: {p_name}")
-
-                # Signal Verdict
-                if bullish_score > bearish_score and bullish_score >= 2:
-                    signal = "BUY"
-                elif bearish_score > bullish_score and bearish_score >= 2:
-                    signal = "SELL"
-                else:
-                    signal = "NEUTRAL"
-
-                # 3. Header & Signal Dashboard
-                st.subheader(f"Today's Signal Dashboard: {ticker.upper()}")
-
-                if signal == "BUY":
-                    st.success("🟢 TODAY'S ACTION: BUY / LONG SETUP")
-                elif signal == "SELL":
-                    st.error("🔴 TODAY'S ACTION: SELL / SHORT SETUP")
-                else:
-                    st.info("🟡 TODAY'S ACTION: NEUTRAL / HOLD — No high-probability setup today.")
-
-                # 4. Display Metrics (Targets ONLY for BUY or SELL)
-                if signal in ["BUY", "SELL"]:
-                    risk_amount = today_price * (risk_percent / 100.0)
-
-                    if signal == "BUY":
-                        entry_price = today_price
-                        stop_loss = entry_price - risk_amount
-                        target_1 = entry_price + (risk_amount * 1.5)
-                        target_2 = entry_price + (risk_amount * 3.0)
-                    else:  # SELL
-                        entry_price = today_price
-                        stop_loss = entry_price + risk_amount
-                        target_1 = entry_price - (risk_amount * 1.5)
-                        target_2 = entry_price - (risk_amount * 3.0)
-
-                    col1, col2, col3, col4, col5 = st.columns(5)
-                    col1.metric("Today's Entry", f"${entry_price:.2f}")
-                    col2.metric("Stop Loss", f"${stop_loss:.2f}", delta=f"-{risk_percent}%" if signal == "BUY" else f"+{risk_percent}%")
-                    col3.metric("Target 1", f"${target_1:.2f}", delta="1:1.5 R/R")
-                    col4.metric("Target 2", f"${target_2:.2f}", delta="1:3.0 R/R")
-                    col5.metric("RSI (14-Day)", f"{rsi_val:.1f}")
-
-                else:  # NEUTRAL
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Today's Close", f"${today_price:.2f}")
-                    col2.metric("RSI (14-Day)", f"{rsi_val:.1f}")
-                    col3.metric("Status", "Awaiting Setup")
-
-                st.markdown("**Today's Analysis Rationale:**")
-                for r in reasons:
-                    st.write(f"- {r}")
-                if not reasons:
-                    st.write("- Market consolidating over the last 7 days. No clear setup today.")
-
-                # 5. Render Chart ONLY for Today's Candle
-                today_df = clean_data.tail(1)
-
-                fig = go.Figure()
-
-                fig.add_trace(go.Candlestick(
-                    x=today_df.index,
-                    open=[float(x) for x in today_df['Open']],
-                    high=[float(x) for x in today_df['High']],
-                    low=[float(x) for x in today_df['Low']],
-                    close=[float(x) for x in today_df['Close']],
-                    name="Today's Candle"
-                ))
-
-                if signal in ["BUY", "SELL"]:
-                    fig.add_hline(y=target_2, line_dash="dash", line_color="green", annotation_text=f"Target 2 (${target_2:.2f})", annotation_position="top right")
-                    fig.add_hline(y=target_1, line_dash="dash", line_color="lightgreen", annotation_text=f"Target 1 (${target_1:.2f})", annotation_position="top right")
-                    fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"Stop Loss (${stop_loss:.2f})", annotation_position="bottom right")
-
-                fig.update_layout(
-                    title=f"Today's Price Candle for {ticker.upper()}",
-                    xaxis_rangeslider_visible=False,
-                    template="plotly_white",
-                    height=450
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
+        # Determine Final Trade Direction
+        if bullish_score > bearish_score and bullish_score >= 2:
+            direction = "BUY"
+        elif bearish_score > bullish_score and bearish_score >= 2:
+            direction = "SELL"
         else:
-            st.error("Could not fetch data for this ticker. Check the symbol.")
+            direction = "NEUTRAL"
 
-    except Exception as e:
-        st.error(f"Error loading dashboard: {str(e)}")
+        # Calculate Risk / Reward Levels (Risk Amount = Risk % of Current Price)
+        risk_amount = current_price * (risk_percent / 100.0)
+
+        if direction == "BUY":
+            entry_price = current_price
+            stop_loss = entry_price - risk_amount
+            target_1 = entry_price + (risk_amount * 1.5)  # 1 : 1.5 Risk-to-Reward
+            target_2 = entry_price + (risk_amount * 3.0)  # 1 : 3.0 Risk-to-Reward
+        elif direction == "SELL":
+            entry_price = current_price
+            stop_loss = entry_price + risk_amount
+            target_1 = entry_price - (risk_amount * 1.5)
+            target_2 = entry_price - (risk_amount * 3.0)
+        else:  # Neutral
+            entry_price = current_price
+            stop_loss = current_price - risk_amount
+            target_1 = current_price + (risk_amount * 1.5)
+            target_2 = current_price + (risk_amount * 3.0)
+
+        return {
+            "direction": direction,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "target_1": target_1,
+            "target_2": target_2,
+            "rsi": rsi_val,
+            "reasons": reasons if reasons else ["Consolidation range. No explicit setup."],
+        }
+
+
+class ForecastEngine:
+    """Generates hypothetical predictive candles for future projection."""
+
+    @staticmethod
+    def generate_forecast_candles(df: pd.DataFrame, direction: str, days: int = 3) -> pd.DataFrame:
+        """Projects 3 hypothetical future candles based on trend direction and recent volatility."""
+        last_row = df.iloc[-1]
+        last_date = last_row.name
+        last_close = float(last_row["Close"])
+
+        # Calculate average daily range (volatility) from last 10 days
+        recent_ranges = (df["High"].tail(10) - df["Low"].tail(10)) / df["Close"].tail(10)
+        avg_volatility = float(recent_ranges.mean()) if not recent_ranges.empty else 0.015
+
+        # Set directional drift factor
+        if direction == "BUY":
+            drift_pct = 0.008  # Positive bias
+        elif direction == "SELL":
+            drift_pct = -0.008  # Negative bias
+        else:
+            drift_pct = 0.001  # Flat bias
+
+        future_candles = []
+        current_price = last_close
+        current_date = last_date
+
+        for i in range(1, days + 1):
+            # Advance to next weekday (skip weekends)
+            current_date += timedelta(days=1)
+            while current_date.weekday() >= 5:
+                current_date += timedelta(days=1)
+
+            expected_move = current_price * drift_pct
+            open_p = current_price
+            close_p = open_p + expected_move + np.random.normal(0, current_price * avg_volatility * 0.3)
+            high_p = max(open_p, close_p) + abs(np.random.normal(0, current_price * avg_volatility * 0.25))
+            low_p = min(open_p, close_p) - abs(np.random.normal(0, current_price * avg_volatility * 0.25))
+
+            future_candles.append({
+                "Date": current_date,
+                "Open": open_p,
+                "High": high_p,
+                "Low": low_p,
+                "Close": close_p,
+            })
+            current_price = close_p
+
+        forecast_df = pd.DataFrame(future_candles)
+        forecast_df.set_index("Date", inplace=True)
+        return forecast_df
+
+
+class ChartVisualizer:
+    """Handles rendering interactive Plotly candlestick charts with forecast overlays."""
+
+    @staticmethod
+    def plot_chart(df: pd.DataFrame, forecast_df: pd.DataFrame, setup: dict, ticker: str):
+        """Creates an interactive candlestick chart displaying historical data, forecasted candles, and trade target levels."""
+        fig = go.Figure()
+
+        # Display last 30 historical candles
+        history_display = df.tail(30)
+
+        # 1. Historical Candlesticks
+        fig.add_trace(go.Candlestick(
+            x=history_display.index,
+            open=history_display["Open"],
+            high=history_display["High"],
+            low=history_display["Low"],
+            close=history_display["Close"],
+            name="Historical OHLC",
+            increasing_line_color="#26a69a",
+            decreasing_line_color="#ef5350",
+        ))
+
+        # 2. Predicted Future Candlesticks (3 Days Ahead)
+        fig.add_trace(go.Candlestick(
+            x=forecast_df.index,
+            open=forecast_df["Open"],
+            high=forecast_df["High"],
+            low=forecast_df["Low"],
+            close=forecast_df["Close"],
+            name="3-Day Forecast",
+            increasing_line_color="rgba(0, 230, 118, 0.65)",
+            decreasing_line_color="rgba(255, 61, 0, 0.65)",
+            opacity=0.8,
+        ))
+
+        # 3. Plot 5-Day and 20-Day Moving Averages
+        if "SMA5" in history_display.columns:
+            fig.add_trace(go.Scatter(
+                x=history_display.index, y=history_display["SMA5"],
+                line=dict(color="#29b6f6", width=1.5), name="5-Day SMA"
+            ))
+        if "SMA20" in history_display.columns:
+            fig.add_trace(go.Scatter(
+                x=history_display.index, y=history_display["SMA20"],
+                line=dict(color="#ffa726", width=1.5), name="20-Day SMA"
+            ))
+
+        # 4. Plot Entry, Stop Loss, and Take Profit Target Lines
+        entry = setup["entry_price"]
+        sl = setup["stop_loss"]
+        t1 = setup["target_1"]
+        t2 = setup["target_2"]
+
+        fig.add_hline(y=entry, line_dash="solid", line_color="#ab47bc", annotation_text=f"Entry (${entry:.2f})", annotation_position="top left")
+        fig.add_hline(y=sl, line_dash="dash", line_color="#ef5350", annotation_text=f"Stop Loss (${sl:.2f})", annotation_position="bottom right")
+        fig.add_hline(y=t1, line_dash="dash", line_color="#81c784", annotation_text=f"Target 1 (${t1:.2f})", annotation_position="top right")
+        fig.add_hline(y=t2, line_dash="dash", line_color="#2e7d32", annotation_text=f"Target 2 (${t2:.2f})", annotation_position="top right")
+
+        # 5. Chart Layout Options
+        direction_color = "Green" if setup["direction"] == "BUY" else ("Red" if setup["direction"] == "SELL" else "Orange")
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{ticker.upper()}</b> Candlestick Analysis & 3-Day Forecast | Signal: <span style='color:{direction_color}'>{setup['direction']}</span>",
+                x=0.01,
+            ),
+            xaxis_title="Date",
+            yaxis_title="Price ($)",
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=650,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+
+        fig.show()
+
+
+def main():
+    """Application entry point."""
+    print("=" * 60)
+    print("      QUANTITATIVE CANDLESTICK ANALYZER & FORECASTER      ")
+    print("=" * 60)
+
+    # Prompt user for stock ticker
+    user_input = input("Enter Stock Ticker (e.g., AAPL, NVDA, TSLA): ").strip()
+    if not user_input:
+        user_input = "AAPL"
+        print("No input provided. Defaulting to AAPL.")
+
+    ticker = user_input.upper()
+
+    # 1. Fetch Historical Data (Last 60 Days to ensure 30-day window after SMA20 warmup)
+    raw_df = StockDataFetcher.get_data(ticker, period="60d")
+
+    # 2. Compute Technical Indicators
+    df = TechnicalAnalyzer.compute_indicators(raw_df)
+
+    # 3. Generate Trade Setup
+    setup = TechnicalAnalyzer.generate_trade_setup(df)
+
+    # 4. Generate 3-Day Future Forecast Candles
+    forecast_df = ForecastEngine.generate_forecast_candles(df, setup["direction"], days=3)
+
+    # 5. Console Output
+    print("\n" + "=" * 60)
+    print(f" TRADE SETUP SUMMARY: {ticker}")
+    print("=" * 60)
+    print(f" Market Direction  : {setup['direction']}")
+    print(f" Current / Entry   : ${setup['entry_price']:.2f}")
+    print(f" Stop Loss (SL)    : ${setup['stop_loss']:.2f}")
+    print(f" Take Profit 1 (T1): ${setup['target_1']:.2f}")
+    print(f" Take Profit 2 (T2): ${setup['target_2']:.2f}")
+    print(f" 14-Day RSI        : {setup['rsi']:.1f}")
+    print("-" * 60)
+    print(" Signal Rationale:")
+    for reason in setup["reasons"]:
+        print(f"  - {reason}")
+    print("=" * 60 + "\n")
+
+    # 6. Plot Interactive Chart
+    ChartVisualizer.plot_chart(df, forecast_df, setup, ticker)
+
+
+if __name__ == "__main__":
+    main()
