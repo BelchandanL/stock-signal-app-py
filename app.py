@@ -5,28 +5,20 @@ import numpy as np
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Top 8 Heavy Movers & Multi-Style Signal Dashboard", layout="wide")
-st.title("⚡ Top 8 Heavy Movers & Multi-Style Signal Dashboard")
 
-# Popular liquid tickers for scanning top heavy movers
+# Watchlist of highly liquid stocks for scanning top heavy movers
 WATCHLIST_TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ"]
 
-# Sidebar Selection
-st.sidebar.header("Navigation & Settings")
-stock_input_mode = st.sidebar.radio(
-    "Stock Selection Mode",
+# Sidebar Mode Selection
+st.sidebar.header("Navigation")
+navigation_mode = st.sidebar.radio(
+    "Choose Mode",
     ["Scan Top 8 Heavy Volume Movers", "Manual Ticker Entry"]
 )
 
-trade_style = st.sidebar.selectbox(
-    "Select Trading Style",
-    ["Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
-)
-
-risk_percent = st.sidebar.slider("Stop Loss Risk %", min_value=0.5, max_value=5.0, value=1.5, step=0.25)
-
 @st.cache_data(ttl=300)
 def scan_top8_heavy_movers(ticker_list):
-    """Scans watchlist and returns top 8 heavy price movers ranked by volume surge and volatility."""
+    """Scans watchlist and returns top 8 heavy price movers strictly sorted in descending order."""
     movers = []
     for sym in ticker_list:
         try:
@@ -43,25 +35,28 @@ def scan_top8_heavy_movers(ticker_list):
                 pct_change = ((price - float(prev["Close"])) / float(prev["Close"])) * 100.0
                 day_range = ((float(latest["High"]) - float(latest["Low"])) / float(latest["Low"])) * 100.0
                 
-                # Volume Surge (Current Volume vs 5-Day Average Volume)
+                # Relative Volume Surge (Current Volume vs 5-Day Average Volume)
                 avg_vol = df["Volume"].tail(5).mean()
                 rvol = float(latest["Volume"]) / avg_vol if avg_vol > 0 else 1.0
 
+                # Score combines raw volatility and relative volume surge
+                impact_score = abs(pct_change) * rvol
+
                 movers.append({
                     "Ticker": sym,
-                    "Current Price": f"${price:.2f}",
+                    "Current Price": price,
                     "Change %": pct_change,
                     "Intraday Range %": day_range,
-                    "Volume Surge (RVOL)": f"{rvol:.2f}x",
-                    "Raw_Score": abs(pct_change) * rvol
+                    "Volume Surge (RVOL)": rvol,
+                    "Score": impact_score
                 })
         except Exception:
             continue
 
     df_movers = pd.DataFrame(movers)
     if not df_movers.empty:
-        # Sort by impact score and strictly limit to Top 8
-        df_movers = df_movers.sort_values(by="Raw_Score", ascending=False).head(8).drop(columns=["Raw_Score"])
+        # Sort strictly in descending order by impact score and keep top 8
+        df_movers = df_movers.sort_values(by="Score", ascending=False).head(8).reset_index(drop=True)
     return df_movers
 
 def analyze_candlestick_patterns(df):
@@ -93,37 +88,57 @@ def analyze_candlestick_patterns(df):
 
     return patterns
 
-# Ticker Determination Logic
-selected_ticker = "NVDA"
 
-if stock_input_mode == "Scan Top 8 Heavy Volume Movers":
-    st.subheader("🔥 Top 8 Heavy Volume Movers & High Volatility Stocks")
-    st.caption("Automatically scans key liquid market movers for high relative volume surge (RVOL) and price range.")
-    
+# MODE 1: SCAN TOP 8 HEAVY MOVERS
+if navigation_mode == "Scan Top 8 Heavy Volume Movers":
+    st.title("🔥 Top 8 Heavy Volume & Price Movers Scanner")
+    st.caption("Real-time ranking of top market movers sorted strictly from highest market impact to lowest.")
+
     with st.spinner("Scanning top 8 heavy market movers..."):
         movers_df = scan_top8_heavy_movers(WATCHLIST_TICKERS)
 
     if not movers_df.empty:
-        # Format percentages for table display
-        formatted_df = movers_df.copy()
-        formatted_df["Change %"] = formatted_df["Change %"].map(lambda x: f"{x:+.2f}%")
-        formatted_df["Intraday Range %"] = formatted_df["Intraday Range %"].map(lambda x: f"{x:.2f}%")
+        # Prepare display copy formatted properly
+        display_df = movers_df.copy()
+        display_df["Rank"] = range(1, len(display_df) + 1)
+        display_df["Current Price"] = display_df["Current Price"].map(lambda x: f"${x:.2f}")
+        display_df["Change %"] = display_df["Change %"].map(lambda x: f"{x:+.2f}%")
+        display_df["Intraday Range %"] = display_df["Intraday Range %"].map(lambda x: f"{x:.2f}%")
+        display_df["Volume Surge (RVOL)"] = display_df["Volume Surge (RVOL)"].map(lambda x: f"{x:.2f}x")
+
+        # Reorder columns for optimal view
+        display_df = display_df[["Rank", "Ticker", "Current Price", "Change %", "Intraday Range %", "Volume Surge (RVOL)"]]
         
-        st.dataframe(formatted_df, use_container_width=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # Select stock directly from Top 8 Heavy Movers Scanner
-        top_movers_list = movers_df["Ticker"].tolist()
-        selected_ticker = st.selectbox("Select one of the Top 8 Heavy Movers to Analyze:", top_movers_list, index=0)
+        selected_ticker = st.selectbox(
+            "Select one of the Top 8 Heavy Movers to inspect trade setup:",
+            movers_df["Ticker"].tolist(),
+            index=0
+        )
+        trade_style = "Day Trade (Intraday)"
+        risk_percent = 1.5
     else:
-        st.warning("Could not fetch top 8 scanner data. Defaulting to NVDA.")
+        st.warning("Could not fetch heavy movers data. Try switching modes.")
         selected_ticker = "NVDA"
-else:
-    selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, NVDA):", "NVDA")
+        trade_style = "Day Trade (Intraday)"
+        risk_percent = 1.5
 
-# Main Analysis & Charting Engine
+# MODE 2: MANUAL TICKER ENTRY
+else:
+    st.title("⚡ Manual Stock Signal & Chart Analyzer")
+    selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, NVDA):", "NVDA")
+    
+    trade_style = st.sidebar.selectbox(
+        "Select Trading Style",
+        ["Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
+    )
+    risk_percent = st.sidebar.slider("Stop Loss Risk %", min_value=0.5, max_value=5.0, value=1.5, step=0.25)
+
+
+# MAIN TECHNICAL ANALYSIS & CHART ENGINE
 if selected_ticker:
     try:
-        # Determine data period and interval based on Trading Style
         if trade_style == "Day Trade (Intraday)":
             period_val, interval_val = "5d", "5m"
             fast_ma, slow_ma = "SMA5", "SMA20"
@@ -141,14 +156,12 @@ if selected_ticker:
             fast_ma, slow_ma = "SMA50", "SMA200"
             r_mult1, r_mult2 = 2.5, 5.0
 
-        # Fetch Stock Data
         data = yf.download(selected_ticker.strip().upper(), period=period_val, interval=interval_val)
         
         if not data.empty:
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
 
-            # 1. Calculate Technical Indicators
             data["SMA5"] = data["Close"].rolling(5).mean()
             data["SMA20"] = data["Close"].rolling(20).mean()
             if trade_style == "Long-Term (Months/Years)":
@@ -163,9 +176,7 @@ if selected_ticker:
 
             clean_data = data.dropna(subset=[fast_ma, slow_ma, "RSI"]).copy()
 
-            if clean_data.empty or len(clean_data) < 2:
-                st.warning("Insufficient data available for this timeframe setup.")
-            else:
+            if not clean_data.empty and len(clean_data) >= 2:
                 if "Intraday" in trade_style:
                     latest_date = clean_data.index[-1].date()
                     display_data = clean_data[clean_data.index.date == latest_date].copy()
@@ -178,7 +189,7 @@ if selected_ticker:
                 prev_bar = clean_data.iloc[-2]
                 current_price = float(latest_bar["Close"])
 
-                # 2. Evaluate Signal Strategy
+                # Signal Calculations
                 patterns = analyze_candlestick_patterns(clean_data)
                 bullish_score, bearish_score = 0, 0
                 reasons = []
@@ -220,15 +231,14 @@ if selected_ticker:
                 else:
                     signal = "BUY"
 
-                # 3. Display Header Banner
-                st.subheader(f"Setup Dashboard: {selected_ticker.upper()} — Mode: {trade_style}")
+                # Dashboard Output
+                st.subheader(f"Setup Dashboard: {selected_ticker.upper()} ({trade_style})")
 
                 if signal == "BUY":
-                    st.success(f"🟢 RECOMMENDED ACTION: BUY / LONG SETUP ({trade_style})")
+                    st.success(f"🟢 RECOMMENDED ACTION: BUY / LONG SETUP")
                 else:
-                    st.error(f"🔴 RECOMMENDED ACTION: SELL / SHORT SETUP ({trade_style})")
+                    st.error(f"🔴 RECOMMENDED ACTION: SELL / SHORT SETUP")
 
-                # 4. Compute & Display Targets + Stop Loss Cards
                 risk_amount = current_price * (risk_percent / 100.0)
 
                 if signal == "BUY":
@@ -236,7 +246,7 @@ if selected_ticker:
                     stop_loss = entry_price - risk_amount
                     target_1 = entry_price + (risk_amount * r_mult1)
                     target_2 = entry_price + (risk_amount * r_mult2)
-                else:  # SELL
+                else:
                     entry_price = current_price
                     stop_loss = entry_price + risk_amount
                     target_1 = entry_price - (risk_amount * r_mult1)
@@ -249,11 +259,11 @@ if selected_ticker:
                 col4.metric("Target 2", f"${target_2:.2f}", delta=f"1:{r_mult2} R/R")
                 col5.metric("RSI", f"{rsi_val:.1f}")
 
-                st.markdown(f"**{trade_style} Signal Rationale:**")
+                st.markdown("**Signal Rationale:**")
                 for r in reasons:
                     st.write(f"- {r}")
 
-                # 5. Render Interactive Chart
+                # Plotly Chart
                 fig = go.Figure()
 
                 fig.add_trace(go.Candlestick(
@@ -273,15 +283,12 @@ if selected_ticker:
                 fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"Stop Loss (${stop_loss:.2f})", annotation_position="bottom right")
 
                 fig.update_layout(
-                    title=f"{trade_style} Candles ({interval_val}) for {selected_ticker.upper()}",
+                    title=f"Candlestick Chart ({interval_val}) for {selected_ticker.upper()}",
                     xaxis_rangeslider_visible=False,
                     template="plotly_white",
                     height=550
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        else:
-            st.error("Could not fetch data for this ticker.")
-
     except Exception as e:
-        st.error(f"Error loading dashboard: {str(e)}")
+        st.error(f"Error executing analysis: {str(e)}")
