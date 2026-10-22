@@ -124,4 +124,164 @@ else:
 if selected_ticker:
     try:
         # Determine data period and interval based on Trading Style
-        if trade_style == "Day
+        if trade_style == "Day Trade (Intraday)":
+            period_val, interval_val = "5d", "5m"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 1.5, 3.0
+        elif trade_style == "Swing Trade":
+            period_val, interval_val = "10d", "15m"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 1.5, 3.0
+        elif trade_style == "Short-Term (1-4 Weeks)":
+            period_val, interval_val = "60d", "1d"
+            fast_ma, slow_ma = "SMA5", "SMA20"
+            r_mult1, r_mult2 = 2.0, 4.0
+        else:  # Long-Term
+            period_val, interval_val = "200d", "1d"
+            fast_ma, slow_ma = "SMA50", "SMA200"
+            r_mult1, r_mult2 = 2.5, 5.0
+
+        # Fetch Stock Data
+        data = yf.download(selected_ticker.strip().upper(), period=period_val, interval=interval_val)
+        
+        if not data.empty:
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+
+            # 1. Calculate Technical Indicators
+            data["SMA5"] = data["Close"].rolling(5).mean()
+            data["SMA20"] = data["Close"].rolling(20).mean()
+            if trade_style == "Long-Term (Months/Years)":
+                data["SMA50"] = data["Close"].rolling(50).mean()
+                data["SMA200"] = data["Close"].rolling(200).mean()
+
+            delta = data["Close"].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            data["RSI"] = 100 - (100 / (1 + rs))
+
+            clean_data = data.dropna(subset=[fast_ma, slow_ma, "RSI"]).copy()
+
+            if clean_data.empty or len(clean_data) < 2:
+                st.warning("Insufficient data available for this timeframe setup.")
+            else:
+                if "Intraday" in trade_style:
+                    latest_date = clean_data.index[-1].date()
+                    display_data = clean_data[clean_data.index.date == latest_date].copy()
+                    if display_data.empty or len(display_data) < 2:
+                        display_data = clean_data.tail(35).copy()
+                else:
+                    display_data = clean_data.tail(40).copy()
+
+                latest_bar = clean_data.iloc[-1]
+                prev_bar = clean_data.iloc[-2]
+                current_price = float(latest_bar["Close"])
+
+                # 2. Evaluate Signal Strategy
+                patterns = analyze_candlestick_patterns(clean_data)
+                bullish_score, bearish_score = 0, 0
+                reasons = []
+
+                if float(prev_bar[fast_ma]) <= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
+                    bullish_score += 2
+                    reasons.append(f"Golden Cross: {fast_ma} crossed above {slow_ma}")
+                elif float(prev_bar[fast_ma]) >= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
+                    bearish_score += 2
+                    reasons.append(f"Death Cross: {fast_ma} crossed below {slow_ma}")
+
+                if float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
+                    bullish_score += 1
+                    reasons.append(f"Trend is Bullish ({fast_ma} > {slow_ma})")
+                elif float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
+                    bearish_score += 1
+                    reasons.append(f"Trend is Bearish ({fast_ma} < {slow_ma})")
+
+                rsi_val = float(latest_bar["RSI"])
+                if rsi_val < 35:
+                    bullish_score += 1
+                    reasons.append(f"Oversold RSI ({rsi_val:.1f})")
+                elif rsi_val > 65:
+                    bearish_score += 1
+                    reasons.append(f"Overbought RSI ({rsi_val:.1f})")
+
+                for bias, p_name in patterns:
+                    if bias == "BULLISH":
+                        bullish_score += 1
+                        reasons.append(f"Pattern: {p_name}")
+                    elif bias == "BEARISH":
+                        bearish_score += 1
+                        reasons.append(f"Pattern: {p_name}")
+
+                if bullish_score > bearish_score:
+                    signal = "BUY"
+                elif bearish_score > bullish_score:
+                    signal = "SELL"
+                else:
+                    signal = "BUY"
+
+                # 3. Display Header Banner
+                st.subheader(f"Setup Dashboard: {selected_ticker.upper()} — Mode: {trade_style}")
+
+                if signal == "BUY":
+                    st.success(f"🟢 RECOMMENDED ACTION: BUY / LONG SETUP ({trade_style})")
+                else:
+                    st.error(f"🔴 RECOMMENDED ACTION: SELL / SHORT SETUP ({trade_style})")
+
+                # 4. Compute & Display Targets + Stop Loss Cards
+                risk_amount = current_price * (risk_percent / 100.0)
+
+                if signal == "BUY":
+                    entry_price = current_price
+                    stop_loss = entry_price - risk_amount
+                    target_1 = entry_price + (risk_amount * r_mult1)
+                    target_2 = entry_price + (risk_amount * r_mult2)
+                else:  # SELL
+                    entry_price = current_price
+                    stop_loss = entry_price + risk_amount
+                    target_1 = entry_price - (risk_amount * r_mult1)
+                    target_2 = entry_price - (risk_amount * r_mult2)
+
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("Current Entry", f"${entry_price:.2f}")
+                col2.metric("Stop Loss", f"${stop_loss:.2f}", delta=f"-{risk_percent}%" if signal == "BUY" else f"+{risk_percent}%")
+                col3.metric("Target 1", f"${target_1:.2f}", delta=f"1:{r_mult1} R/R")
+                col4.metric("Target 2", f"${target_2:.2f}", delta=f"1:{r_mult2} R/R")
+                col5.metric("RSI", f"{rsi_val:.1f}")
+
+                st.markdown(f"**{trade_style} Signal Rationale:**")
+                for r in reasons:
+                    st.write(f"- {r}")
+
+                # 5. Render Interactive Chart
+                fig = go.Figure()
+
+                fig.add_trace(go.Candlestick(
+                    x=display_data.index,
+                    open=[float(x) for x in display_data["Open"]],
+                    high=[float(x) for x in display_data["High"]],
+                    low=[float(x) for x in display_data["Low"]],
+                    close=[float(x) for x in display_data["Close"]],
+                    name="Price Candles"
+                ))
+
+                fig.add_trace(go.Scatter(x=display_data.index, y=display_data[fast_ma], line=dict(color="blue", width=1.5), name=fast_ma))
+                fig.add_trace(go.Scatter(x=display_data.index, y=display_data[slow_ma], line=dict(color="orange", width=1.5), name=slow_ma))
+
+                fig.add_hline(y=target_2, line_dash="dash", line_color="green", annotation_text=f"Target 2 (${target_2:.2f})", annotation_position="top right")
+                fig.add_hline(y=target_1, line_dash="dash", line_color="lightgreen", annotation_text=f"Target 1 (${target_1:.2f})", annotation_position="top right")
+                fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"Stop Loss (${stop_loss:.2f})", annotation_position="bottom right")
+
+                fig.update_layout(
+                    title=f"{trade_style} Candles ({interval_val}) for {selected_ticker.upper()}",
+                    xaxis_rangeslider_visible=False,
+                    template="plotly_white",
+                    height=550
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.error("Could not fetch data for this ticker.")
+
+    except Exception as e:
+        st.error(f"Error loading dashboard: {str(e)}")
