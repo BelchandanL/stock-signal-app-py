@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Top 10 Heavy Movers & Multi-Style Signal Dashboard", layout="wide")
 
-# Active Market Movers Watchlist
 WATCHLIST_TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
 
 # Sidebar Mode Navigation
@@ -17,23 +16,20 @@ navigation_mode = st.sidebar.radio(
 )
 
 def fetch_put_call_ratio(ticker_symbol):
-    """Fetches the nearest option chain and calculates the Volume Put/Call Ratio (PCR)."""
+    """Fetches option chain and calculates Volume Put/Call Ratio (PCR)."""
     try:
         ticker_obj = yf.Ticker(ticker_symbol)
         options_expirations = ticker_obj.options
-        
         if not options_expirations:
             return None, "No Options Data"
 
         nearest_exp = options_expirations[0]
         opt_chain = ticker_obj.option_chain(nearest_exp)
-
         calls = opt_chain.calls
         puts = opt_chain.puts
 
         total_call_vol = calls["volume"].fillna(0).sum()
         total_put_vol = puts["volume"].fillna(0).sum()
-
         pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 1.0
 
         if pcr > 1.2:
@@ -44,7 +40,6 @@ def fetch_put_call_ratio(ticker_symbol):
             sentiment = f"Neutral ({pcr:.2f})"
 
         return round(pcr, 2), sentiment
-
     except Exception:
         return None, "Options Unavailable"
 
@@ -59,7 +54,6 @@ def fetch_cash_flow_sentiment(ticker_symbol):
         if cf is None or cf.empty:
             return None, "N/A (ETFs/Indices)"
 
-        # Get Operating Cash Flow & Free Cash Flow
         operating_cf = None
         free_cf = None
 
@@ -82,14 +76,12 @@ def fetch_cash_flow_sentiment(ticker_symbol):
             else:
                 sentiment = f"Cash Burn / Negative Yield ({fcf_yield:.1f}%)"
             return round(fcf_yield, 2), sentiment
-
         elif operating_cf and operating_cf > 0:
             return 1.0, "Positive Operating Cash Flow"
         elif operating_cf and operating_cf < 0:
             return -1.0, "Negative Operating Cash Flow"
         else:
             return None, "Neutral Cash Flow"
-
     except Exception:
         return None, "Cash Flow Unavailable"
 
@@ -154,34 +146,6 @@ def scan_top10_heavy_movers(ticker_list):
         df_movers = df_movers.sort_values(by="Score", ascending=False).head(10).reset_index(drop=True)
     return df_movers
 
-def analyze_candlestick_patterns(df):
-    """Detects primary reversal candlestick patterns."""
-    patterns = []
-    if len(df) < 2:
-        return patterns
-
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    curr_open, curr_close = float(curr["Open"]), float(curr["Close"])
-    curr_high, curr_low = float(curr["High"]), float(curr["Low"])
-    prev_open, prev_close = float(prev["Open"]), float(prev["Close"])
-
-    body_size = abs(curr_close - curr_open)
-    total_range = curr_high - curr_low
-    lower_wick = min(curr_open, curr_close) - curr_low
-    upper_wick = curr_high - max(curr_open, curr_close)
-
-    if prev_close < prev_open and curr_close > curr_open and curr_close >= prev_open:
-        patterns.append(("BULLISH", "Bullish Engulfing"))
-    if prev_close > prev_open and curr_close < curr_open and curr_close <= prev_open:
-        patterns.append(("BEARISH", "Bearish Engulfing"))
-    if total_range > 0 and (lower_wick >= 2 * body_size) and (upper_wick <= 0.2 * body_size) and curr_close > curr_open:
-        patterns.append(("BULLISH", "Hammer Reversal"))
-    if total_range > 0 and (upper_wick >= 2 * body_size) and (lower_wick <= 0.2 * body_size) and curr_close < curr_open:
-        patterns.append(("BEARISH", "Shooting Star"))
-
-    return patterns
 
 def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_sentiment, cf_yield, cf_sentiment):
     """Evaluates quantitative signal setup across technicals, options PCR, and cash flow sentiment."""
@@ -202,7 +166,6 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
 
-    # Technical Indicators
     data["SMA5"] = data["Close"].rolling(5).mean()
     data["SMA20"] = data["Close"].rolling(20).mean()
     data["SMA50"] = data["Close"].rolling(50).mean()
@@ -241,7 +204,6 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     bullish_score, bearish_score = 0, 0
     reasons = []
 
-    # ORB High/Low Check for Scalping
     orb_high, orb_low = None, None
     if "Scalping" in style_name and len(clean_data) >= 15:
         first_15m = clean_data.head(15)
@@ -254,7 +216,6 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
             bearish_score += 2
             reasons.append(f"ORB Breakdown (${orb_low:.2f})")
 
-    # Options Put/Call Ratio Sentiment
     if pcr_val is not None:
         if pcr_val < 0.6:
             bullish_score += 1
@@ -263,11 +224,10 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
             bearish_score += 1
             reasons.append("Put Heavy Sentiment")
 
-    # Cash Flow Sentiment Impact (Higher weight for Swing / Short / Long Term)
     if cf_yield is not None:
         if cf_yield > 0:
             bullish_score += 1
-            reasons.append("Positive Cash Generation")
+            reasons.append("Positive Cash Flow")
         elif cf_yield < 0:
             bearish_score += 1
             reasons.append("Negative Cash Flow")
@@ -294,7 +254,6 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
 
     signal = "BUY" if bullish_score >= bearish_score else "SELL"
 
-    # Stop & Targets
     if "Scalping" in style_name:
         stop_dist = max(current_atr * 1.2, current_price * 0.003)
     else:
@@ -327,13 +286,13 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     return setup_dict, clean_data, (orb_high, orb_low)
 
 
-# SCREENER SELECTION MODE
-if navigation_mode == "Scan Top 10 Heavy Volume Movers":
-    st.title("🔥 Top 10 Heavy Volume & Momentum Movers Screener")
-    st.caption("Scans market movers evaluating RVOL, % Change, Current Volume, Share Float, and ATR(14).")
+# BACKGROUND REFRESH FRAGMENT (Auto-runs every 60s without full-page reloads)
+@st.fragment(run_every="60s")
+def render_top10_screener():
+    st.subheader("🔥 Top 10 Heavy Volume & Momentum Movers Screener")
+    st.caption("Auto-refreshes in background every 60s | Evaluates RVOL, % Change, Volume, Float & ATR(14).")
 
-    with st.spinner("Scanning Top 10 heavy movers..."):
-        movers_df = scan_top10_heavy_movers(WATCHLIST_TICKERS)
+    movers_df = scan_top10_heavy_movers(WATCHLIST_TICKERS)
 
     if not movers_df.empty:
         display_df = movers_df.copy()
@@ -348,14 +307,17 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers":
         display_df = display_df[["Rank", "Ticker", "Price", "Change %", "Current Volume", "RVOL", "ATR (14)", "ATR %", "Share Float"]]
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        selected_ticker = st.selectbox(
-            "Select one of the Top 10 Heavy Movers for Multi-Style Analysis:",
-            movers_df["Ticker"].tolist(),
-            index=0
-        )
+        return movers_df["Ticker"].tolist()
     else:
         st.warning("Could not fetch heavy movers data.")
-        selected_ticker = "NVDA"
+        return ["NVDA"]
+
+
+# SCREENER SELECTION MODE
+if navigation_mode == "Scan Top 10 Heavy Volume Movers":
+    st.title("🔥 Real-Time Market Screener Mode")
+    ticker_options = render_top10_screener()
+    selected_ticker = st.selectbox("Select a Heavy Mover for Multi-Style Analysis:", ticker_options, index=0)
 else:
     st.title("⚡ Manual Stock Signal & Chart Analyzer")
     selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, PANW):", "PANW")
@@ -372,15 +334,8 @@ risk_pct = st.sidebar.slider("Stop Loss Risk %", min_value=0.25, max_value=5.0, 
 if selected_ticker:
     clean_sym = selected_ticker.strip().upper()
     
-    # Fetch Options PCR & Cash Flow Sentiment
     pcr_val, pcr_sentiment = fetch_put_call_ratio(clean_sym)
     cf_yield, cf_sentiment = fetch_cash_flow_sentiment(clean_sym)
-
-    st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
-    
-    col_a, col_b = st.columns(2)
-    col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
-    col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
 
     styles_list = [
         "Scalping (15m ORB + 1m)",
@@ -402,7 +357,24 @@ if selected_ticker:
             focused_data = c_data
             focused_orb = orb_range
 
+    # CALCULATE MULTI-STYLE SIGNAL CONSENSUS FOR ALERT BANNER
     if all_signals:
+        buy_count = sum(1 for s in all_signals if s["Signal"] == "BUY")
+        sell_count = sum(1 for s in all_signals if s["Signal"] == "SELL")
+        total_styles = len(all_signals)
+
+        # TOP ALERT BANNER (Triggers on 80%+ Consensus: 4 or 5 out of 5 styles agree)
+        if buy_count >= 4:
+            st.success(f"🚀 **STRONG CONVICTION BUY REMINDER:** {buy_count}/{total_styles} Trading Timeframes Agree on a **STRONG LONG / BUY SETUP** for {clean_sym}!")
+        elif sell_count >= 4:
+            st.error(f"⚠️ **STRONG CONVICTION SELL REMINDER:** {sell_count}/{total_styles} Trading Timeframes Agree on a **STRONG SHORT / SELL SETUP** for {clean_sym}!")
+
+        st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
+        
+        col_a, col_b = st.columns(2)
+        col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
+        col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
+
         signals_df = pd.DataFrame(all_signals)
         st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "Cash Flow Sentiment", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
 
@@ -441,3 +413,10 @@ if selected_ticker:
             height=550
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    # BOTTOM ALERT BANNER
+    if all_signals:
+        if buy_count >= 4:
+            st.success(f"🚀 **STRONG CONVICTION BUY REMINDER:** {buy_count}/{total_styles} Trading Timeframes Agree on a **STRONG LONG / BUY SETUP** for {clean_sym}!")
+        elif sell_count >= 4:
+            st.error(f"⚠️ **STRONG CONVICTION SELL REMINDER:** {sell_count}/{total_styles} Trading Timeframes Agree on a **STRONG SHORT / SELL SETUP** for {clean_sym}!")
