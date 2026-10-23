@@ -286,7 +286,38 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     return setup_dict, clean_data, (orb_high, orb_low)
 
 
-# BACKGROUND REFRESH FRAGMENT (Auto-runs every 60s without full-page reloads)
+@st.cache_data(ttl=300)
+def find_top_market_opportunity(top_tickers):
+    """Scans all Top 10 stocks in the background and finds the SINGLE highest conviction setup."""
+    best_candidate = None
+    highest_consensus = 0
+    best_direction = "BUY"
+
+    for sym in top_tickers:
+        buy_c, sell_c = 0, 0
+        styles_list = ["Scalping (15m ORB + 1m)", "Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
+        
+        for style in styles_list:
+            setup, _, _ = evaluate_style_signal(sym, style, 1.5, None, "N/A", None, "N/A")
+            if setup:
+                if setup["Signal"] == "BUY":
+                    buy_c += 1
+                else:
+                    sell_c += 1
+
+        if buy_c >= 4 and buy_c > highest_consensus:
+            highest_consensus = buy_c
+            best_candidate = sym
+            best_direction = "BUY"
+        elif sell_c >= 4 and sell_c > highest_consensus:
+            highest_consensus = sell_c
+            best_candidate = sym
+            best_direction = "SELL"
+
+    return best_candidate, best_direction, highest_consensus
+
+
+# BACKGROUND REFRESH FRAGMENT
 @st.fragment(run_every="60s")
 def render_top10_screener():
     st.subheader("🔥 Top 10 Heavy Volume & Momentum Movers Screener")
@@ -317,7 +348,17 @@ def render_top10_screener():
 if navigation_mode == "Scan Top 10 Heavy Volume Movers":
     st.title("🔥 Real-Time Market Screener Mode")
     ticker_options = render_top10_screener()
+    
+    # SINGLE GLOBAL MARKET ALERT BANNER (Checks all stocks in Top 10 list)
+    opp_ticker, opp_dir, opp_score = find_top_market_opportunity(ticker_options)
+    if opp_ticker and opp_ticker != st.session_state.get("selected_stock", ticker_options[0]):
+        if opp_dir == "BUY":
+            st.success(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Top 10 Screener) has triggered a **{opp_score}/5 CONVICTION BUY SETUP**!")
+        else:
+            st.error(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Top 10 Screener) has triggered a **{opp_score}/5 CONVICTION SELL SETUP**!")
+
     selected_ticker = st.selectbox("Select a Heavy Mover for Multi-Style Analysis:", ticker_options, index=0)
+    st.session_state["selected_stock"] = selected_ticker
 else:
     st.title("⚡ Manual Stock Signal & Chart Analyzer")
     selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, PANW):", "PANW")
@@ -357,24 +398,13 @@ if selected_ticker:
             focused_data = c_data
             focused_orb = orb_range
 
-    # CALCULATE MULTI-STYLE SIGNAL CONSENSUS FOR ALERT BANNER
+    st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
+    
+    col_a, col_b = st.columns(2)
+    col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
+    col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
+
     if all_signals:
-        buy_count = sum(1 for s in all_signals if s["Signal"] == "BUY")
-        sell_count = sum(1 for s in all_signals if s["Signal"] == "SELL")
-        total_styles = len(all_signals)
-
-        # TOP ALERT BANNER (Triggers on 80%+ Consensus: 4 or 5 out of 5 styles agree)
-        if buy_count >= 4:
-            st.success(f"🚀 **STRONG CONVICTION BUY REMINDER:** {buy_count}/{total_styles} Trading Timeframes Agree on a **STRONG LONG / BUY SETUP** for {clean_sym}!")
-        elif sell_count >= 4:
-            st.error(f"⚠️ **STRONG CONVICTION SELL REMINDER:** {sell_count}/{total_styles} Trading Timeframes Agree on a **STRONG SHORT / SELL SETUP** for {clean_sym}!")
-
-        st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
-        
-        col_a, col_b = st.columns(2)
-        col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
-        col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
-
         signals_df = pd.DataFrame(all_signals)
         st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "Cash Flow Sentiment", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
 
@@ -413,10 +443,3 @@ if selected_ticker:
             height=550
         )
         st.plotly_chart(fig, use_container_width=True)
-
-    # BOTTOM ALERT BANNER
-    if all_signals:
-        if buy_count >= 4:
-            st.success(f"🚀 **STRONG CONVICTION BUY REMINDER:** {buy_count}/{total_styles} Trading Timeframes Agree on a **STRONG LONG / BUY SETUP** for {clean_sym}!")
-        elif sell_count >= 4:
-            st.error(f"⚠️ **STRONG CONVICTION SELL REMINDER:** {sell_count}/{total_styles} Trading Timeframes Agree on a **STRONG SHORT / SELL SETUP** for {clean_sym}!")
