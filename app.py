@@ -6,8 +6,8 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Top 8 Heavy Movers & Multi-Style Signal Dashboard", layout="wide")
 
-# Watchlist of highly liquid stocks for scanning top heavy movers
-WATCHLIST_TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ"]
+# Expanded Watchlist of active stocks
+WATCHLIST_TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA"]
 
 # Sidebar Mode Selection
 st.sidebar.header("Navigation")
@@ -18,13 +18,23 @@ navigation_mode = st.sidebar.radio(
 
 @st.cache_data(ttl=300)
 def scan_top8_heavy_movers(ticker_list):
-    """Scans watchlist and returns top 8 heavy price movers strictly sorted in descending order."""
+    """
+    Scans watchlist evaluating:
+    - Relative Volume (RVOL)
+    - Percent Change (% Change)
+    - Current Volume
+    - Share Float
+    - Average True Range (ATR - 14)
+    Returns Top 8 stocks sorted strictly by composite impact score.
+    """
     movers = []
+    
     for sym in ticker_list:
         try:
             ticker_obj = yf.Ticker(sym)
-            df = ticker_obj.history(period="10d", interval="1d")
-            if not df.empty and len(df) >= 2:
+            df = ticker_obj.history(period="30d", interval="1d")
+            
+            if not df.empty and len(df) >= 15:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
 
@@ -33,21 +43,43 @@ def scan_top8_heavy_movers(ticker_list):
 
                 price = float(latest["Close"])
                 pct_change = ((price - float(prev["Close"])) / float(prev["Close"])) * 100.0
-                day_range = ((float(latest["High"]) - float(latest["Low"])) / float(latest["Low"])) * 100.0
-                
-                # Relative Volume Surge (Current Volume vs 5-Day Average Volume)
-                avg_vol = df["Volume"].tail(5).mean()
-                rvol = float(latest["Volume"]) / avg_vol if avg_vol > 0 else 1.0
+                curr_volume = int(latest["Volume"])
 
-                # Score combines raw volatility and relative volume surge
-                impact_score = abs(pct_change) * rvol
+                # 1. Relative Volume (RVOL)
+                avg_vol_10d = df["Volume"].tail(10).mean()
+                rvol = float(curr_volume) / avg_vol_10d if avg_vol_10d > 0 else 1.0
+
+                # 2. Average True Range (ATR - 14 Period)
+                high_low = df["High"] - df["Low"]
+                high_prev_close = (df["High"] - df["Close"].shift(1)).abs()
+                low_prev_close = (df["Low"] - df["Close"].shift(1)).abs()
+                tr = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
+                atr_14 = float(tr.rolling(14).mean().iloc[-1])
+                atr_pct = (atr_14 / price) * 100.0  # ATR relative to price
+
+                # 3. Share Float
+                info = ticker_obj.info
+                float_shares = info.get("floatShares", None)
+                if float_shares and float_shares > 0:
+                    float_fmt = f"{float_shares / 1e6:.1f}M"
+                    # Low-float multiplier boost (lower float = higher explosive score)
+                    float_mult = 1.5 if float_shares < 100e6 else 1.0
+                else:
+                    float_fmt = "N/A"
+                    float_mult = 1.0
+
+                # 4. Composite Quantitative Impact Score
+                impact_score = abs(pct_change) * rvol * atr_pct * float_mult
 
                 movers.append({
                     "Ticker": sym,
-                    "Current Price": price,
+                    "Price": price,
                     "Change %": pct_change,
-                    "Intraday Range %": day_range,
-                    "Volume Surge (RVOL)": rvol,
+                    "Current Volume": curr_volume,
+                    "RVOL": rvol,
+                    "ATR (14)": atr_14,
+                    "ATR %": atr_pct,
+                    "Share Float": float_fmt,
                     "Score": impact_score
                 })
         except Exception:
@@ -55,7 +87,7 @@ def scan_top8_heavy_movers(ticker_list):
 
     df_movers = pd.DataFrame(movers)
     if not df_movers.empty:
-        # Sort strictly in descending order by impact score and keep top 8
+        # Sort strictly in descending order by composite impact score and take Top 8
         df_movers = df_movers.sort_values(by="Score", ascending=False).head(8).reset_index(drop=True)
     return df_movers
 
@@ -91,23 +123,25 @@ def analyze_candlestick_patterns(df):
 
 # MODE 1: SCAN TOP 8 HEAVY MOVERS
 if navigation_mode == "Scan Top 8 Heavy Volume Movers":
-    st.title("🔥 Top 8 Heavy Volume & Price Movers Scanner")
-    st.caption("Real-time ranking of top market movers sorted strictly from highest market impact to lowest.")
+    st.title("🔥 Top 8 Heavy Volume & Momentum Movers Scanner")
+    st.caption("Quantitative scanner evaluating RVOL, % Change, Current Volume, Share Float, and ATR(14).")
 
-    with st.spinner("Scanning top 8 heavy market movers..."):
+    with st.spinner("Scanning market for Top 8 heavy movers..."):
         movers_df = scan_top8_heavy_movers(WATCHLIST_TICKERS)
 
     if not movers_df.empty:
-        # Prepare display copy formatted properly
+        # Format metrics for table view
         display_df = movers_df.copy()
         display_df["Rank"] = range(1, len(display_df) + 1)
-        display_df["Current Price"] = display_df["Current Price"].map(lambda x: f"${x:.2f}")
+        display_df["Price"] = display_df["Price"].map(lambda x: f"${x:.2f}")
         display_df["Change %"] = display_df["Change %"].map(lambda x: f"{x:+.2f}%")
-        display_df["Intraday Range %"] = display_df["Intraday Range %"].map(lambda x: f"{x:.2f}%")
-        display_df["Volume Surge (RVOL)"] = display_df["Volume Surge (RVOL)"].map(lambda x: f"{x:.2f}x")
+        display_df["Current Volume"] = display_df["Current Volume"].map(lambda x: f"{x:,}")
+        display_df["RVOL"] = display_df["RVOL"].map(lambda x: f"{x:.2f}x")
+        display_df["ATR (14)"] = display_df["ATR (14)"].map(lambda x: f"${x:.2f}")
+        display_df["ATR %"] = display_df["ATR %"].map(lambda x: f"{x:.2f}%")
 
-        # Reorder columns for optimal view
-        display_df = display_df[["Rank", "Ticker", "Current Price", "Change %", "Intraday Range %", "Volume Surge (RVOL)"]]
+        # Order columns cleanly
+        display_df = display_df[["Rank", "Ticker", "Price", "Change %", "Current Volume", "RVOL", "ATR (14)", "ATR %", "Share Float"]]
         
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -235,9 +269,9 @@ if selected_ticker:
                 st.subheader(f"Setup Dashboard: {selected_ticker.upper()} ({trade_style})")
 
                 if signal == "BUY":
-                    st.success(f"🟢 RECOMMENDED ACTION: BUY / LONG SETUP")
+                    st.success("🟢 RECOMMENDED ACTION: BUY / LONG SETUP")
                 else:
-                    st.error(f"🔴 RECOMMENDED ACTION: SELL / SHORT SETUP")
+                    st.error("🔴 RECOMMENDED ACTION: SELL / SHORT SETUP")
 
                 risk_amount = current_price * (risk_percent / 100.0)
 
