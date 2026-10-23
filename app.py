@@ -16,6 +16,43 @@ navigation_mode = st.sidebar.radio(
     ["Scan Top 10 Heavy Volume Movers", "Manual Ticker Entry"]
 )
 
+def fetch_put_call_ratio(ticker_symbol):
+    """Fetches the nearest option chain and calculates the Volume Put/Call Ratio (PCR)."""
+    try:
+        ticker_obj = yf.Ticker(ticker_symbol)
+        options_expirations = ticker_obj.options
+        
+        if not options_expirations:
+            return None, "No Options Data"
+
+        # Use nearest expiration date
+        nearest_exp = options_expirations[0]
+        opt_chain = ticker_obj.option_chain(nearest_exp)
+
+        calls = opt_chain.calls
+        puts = opt_chain.puts
+
+        total_call_vol = calls["volume"].fillna(0).sum()
+        total_put_vol = puts["volume"].fillna(0).sum()
+
+        if total_call_vol > 0:
+            pcr = total_put_vol / total_call_vol
+        else:
+            pcr = 1.0
+
+        if pcr > 1.2:
+            sentiment = f"Heavy Bearish Puts ({pcr:.2f})"
+        elif pcr < 0.6:
+            sentiment = f"Heavy Bullish Calls ({pcr:.2f})"
+        else:
+            sentiment = f"Neutral ({pcr:.2f})"
+
+        return round(pcr, 2), sentiment
+
+    except Exception:
+        return None, "Options Unavailable"
+
+
 @st.cache_data(ttl=300)
 def scan_top10_heavy_movers(ticker_list):
     """Scans watchlist and ranks stocks based on RVOL, % Change, Share Float, and ATR(14)."""
@@ -105,8 +142,8 @@ def analyze_candlestick_patterns(df):
 
     return patterns
 
-def evaluate_style_signal(ticker_symbol, style_name, risk_percent):
-    """Evaluates individual quantitative signal setup for a given trading style."""
+def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_sentiment):
+    """Evaluates quantitative signal setup for a given trading style including PCR sentiment."""
     style_configs = {
         "Scalping (15m ORB + 1m)": {"period": "1d", "interval": "1m", "fast": "EMA9", "slow": "EMA21", "r1": 1.0, "r2": 2.0},
         "Day Trade (Intraday)": {"period": "5d", "interval": "5m", "fast": "SMA5", "slow": "SMA20", "r1": 1.5, "r2": 3.0},
@@ -171,10 +208,19 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent):
         orb_low = float(first_15m["Low"].min())
         if current_price > orb_high:
             bullish_score += 2
-            reasons.append(f"ORB Breakout: Price > 15m High (${orb_high:.2f})")
+            reasons.append(f"ORB Breakout (${orb_high:.2f})")
         elif current_price < orb_low:
             bearish_score += 2
-            reasons.append(f"ORB Breakdown: Price < 15m Low (${orb_low:.2f})")
+            reasons.append(f"ORB Breakdown (${orb_low:.2f})")
+
+    # Options Put/Call Ratio Sentiment Logic
+    if pcr_val is not None:
+        if pcr_val < 0.6:
+            bullish_score += 1
+            reasons.append("Call Heavy Sentiment")
+        elif pcr_val > 1.2:
+            bearish_score += 1
+            reasons.append("Put Heavy Sentiment")
 
     if float(prev_bar[fast_ma]) <= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
         bullish_score += 2
@@ -222,6 +268,7 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent):
         "Stop Loss": f"${sl_p:.2f}",
         "Target 1": f"${t1_p:.2f}",
         "Target 2": f"${t2_p:.2f}",
+        "Options PCR": pcr_sentiment,
         "RSI": f"{rsi_val:.1f}",
         "Rationale": ", ".join(reasons) if reasons else "Trend Alignment"
     }
@@ -274,7 +321,11 @@ risk_pct = st.sidebar.slider("Stop Loss Risk %", min_value=0.25, max_value=5.0, 
 if selected_ticker:
     clean_sym = selected_ticker.strip().upper()
     
+    # Fetch Options Put/Call Ratio Sentiment
+    pcr_val, pcr_sentiment = fetch_put_call_ratio(clean_sym)
+
     st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
+    st.caption(f"**Options Positioning:** Put/Call Ratio (PCR): **{pcr_sentiment}**")
     
     styles_list = [
         "Scalping (15m ORB + 1m)",
@@ -289,7 +340,7 @@ if selected_ticker:
     focused_orb = (None, None)
 
     for style in styles_list:
-        setup, c_data, orb_range = evaluate_style_signal(clean_sym, style, risk_pct)
+        setup, c_data, orb_range = evaluate_style_signal(clean_sym, style, risk_pct, pcr_val, pcr_sentiment)
         if setup:
             all_signals.append(setup)
         if style == focus_style:
@@ -298,7 +349,7 @@ if selected_ticker:
 
     if all_signals:
         signals_df = pd.DataFrame(all_signals)
-        st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
+        st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
 
     # Render Chart for Selected Focused Style
     if focused_data is not None and not focused_data.empty:
@@ -316,7 +367,7 @@ if selected_ticker:
             name="Price Candles"
         ))
 
-        # Add Fast/Slow Moving Average Lines
+        # Fast/Slow Moving Average Lines
         if "EMA9" in display_chart_data.columns and "Scalping" in focus_style:
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA9"], line=dict(color="blue", width=1.5), name="9-EMA"))
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA21"], line=dict(color="orange", width=1.5), name="21-EMA"))
