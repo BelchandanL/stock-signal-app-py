@@ -25,7 +25,6 @@ def fetch_put_call_ratio(ticker_symbol):
         if not options_expirations:
             return None, "No Options Data"
 
-        # Use nearest expiration date
         nearest_exp = options_expirations[0]
         opt_chain = ticker_obj.option_chain(nearest_exp)
 
@@ -35,10 +34,7 @@ def fetch_put_call_ratio(ticker_symbol):
         total_call_vol = calls["volume"].fillna(0).sum()
         total_put_vol = puts["volume"].fillna(0).sum()
 
-        if total_call_vol > 0:
-            pcr = total_put_vol / total_call_vol
-        else:
-            pcr = 1.0
+        pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 1.0
 
         if pcr > 1.2:
             sentiment = f"Heavy Bearish Puts ({pcr:.2f})"
@@ -51,6 +47,51 @@ def fetch_put_call_ratio(ticker_symbol):
 
     except Exception:
         return None, "Options Unavailable"
+
+
+def fetch_cash_flow_sentiment(ticker_symbol):
+    """Fetches Operating Cash Flow and Free Cash Flow to determine Cash Flow Sentiment."""
+    try:
+        ticker_obj = yf.Ticker(ticker_symbol)
+        cf = ticker_obj.cashflow
+        info = ticker_obj.info
+
+        if cf is None or cf.empty:
+            return None, "N/A (ETFs/Indices)"
+
+        # Get Operating Cash Flow & Free Cash Flow
+        operating_cf = None
+        free_cf = None
+
+        if "Operating Cash Flow" in cf.index:
+            operating_cf = cf.loc["Operating Cash Flow"].iloc[0]
+        elif "Total Cash From Operating Activities" in cf.index:
+            operating_cf = cf.loc["Total Cash From Operating Activities"].iloc[0]
+
+        if "Free Cash Flow" in cf.index:
+            free_cf = cf.loc["Free Cash Flow"].iloc[0]
+
+        mcap = info.get("marketCap", None)
+
+        if free_cf and mcap and mcap > 0:
+            fcf_yield = (free_cf / mcap) * 100.0
+            if fcf_yield > 4.0:
+                sentiment = f"Strong Cash Generation (Yield: {fcf_yield:.1f}%)"
+            elif fcf_yield > 0:
+                sentiment = f"Positive Cash Flow (Yield: {fcf_yield:.1f}%)"
+            else:
+                sentiment = f"Cash Burn / Negative Yield ({fcf_yield:.1f}%)"
+            return round(fcf_yield, 2), sentiment
+
+        elif operating_cf and operating_cf > 0:
+            return 1.0, "Positive Operating Cash Flow"
+        elif operating_cf and operating_cf < 0:
+            return -1.0, "Negative Operating Cash Flow"
+        else:
+            return None, "Neutral Cash Flow"
+
+    except Exception:
+        return None, "Cash Flow Unavailable"
 
 
 @st.cache_data(ttl=300)
@@ -142,8 +183,8 @@ def analyze_candlestick_patterns(df):
 
     return patterns
 
-def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_sentiment):
-    """Evaluates quantitative signal setup for a given trading style including PCR sentiment."""
+def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_sentiment, cf_yield, cf_sentiment):
+    """Evaluates quantitative signal setup across technicals, options PCR, and cash flow sentiment."""
     style_configs = {
         "Scalping (15m ORB + 1m)": {"period": "1d", "interval": "1m", "fast": "EMA9", "slow": "EMA21", "r1": 1.0, "r2": 2.0},
         "Day Trade (Intraday)": {"period": "5d", "interval": "5m", "fast": "SMA5", "slow": "SMA20", "r1": 1.5, "r2": 3.0},
@@ -213,7 +254,7 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
             bearish_score += 2
             reasons.append(f"ORB Breakdown (${orb_low:.2f})")
 
-    # Options Put/Call Ratio Sentiment Logic
+    # Options Put/Call Ratio Sentiment
     if pcr_val is not None:
         if pcr_val < 0.6:
             bullish_score += 1
@@ -221,6 +262,15 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
         elif pcr_val > 1.2:
             bearish_score += 1
             reasons.append("Put Heavy Sentiment")
+
+    # Cash Flow Sentiment Impact (Higher weight for Swing / Short / Long Term)
+    if cf_yield is not None:
+        if cf_yield > 0:
+            bullish_score += 1
+            reasons.append("Positive Cash Generation")
+        elif cf_yield < 0:
+            bearish_score += 1
+            reasons.append("Negative Cash Flow")
 
     if float(prev_bar[fast_ma]) <= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
         bullish_score += 2
@@ -269,6 +319,7 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
         "Target 1": f"${t1_p:.2f}",
         "Target 2": f"${t2_p:.2f}",
         "Options PCR": pcr_sentiment,
+        "Cash Flow Sentiment": cf_sentiment,
         "RSI": f"{rsi_val:.1f}",
         "Rationale": ", ".join(reasons) if reasons else "Trend Alignment"
     }
@@ -321,12 +372,16 @@ risk_pct = st.sidebar.slider("Stop Loss Risk %", min_value=0.25, max_value=5.0, 
 if selected_ticker:
     clean_sym = selected_ticker.strip().upper()
     
-    # Fetch Options Put/Call Ratio Sentiment
+    # Fetch Options PCR & Cash Flow Sentiment
     pcr_val, pcr_sentiment = fetch_put_call_ratio(clean_sym)
+    cf_yield, cf_sentiment = fetch_cash_flow_sentiment(clean_sym)
 
     st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
-    st.caption(f"**Options Positioning:** Put/Call Ratio (PCR): **{pcr_sentiment}**")
     
+    col_a, col_b = st.columns(2)
+    col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
+    col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
+
     styles_list = [
         "Scalping (15m ORB + 1m)",
         "Day Trade (Intraday)",
@@ -340,7 +395,7 @@ if selected_ticker:
     focused_orb = (None, None)
 
     for style in styles_list:
-        setup, c_data, orb_range = evaluate_style_signal(clean_sym, style, risk_pct, pcr_val, pcr_sentiment)
+        setup, c_data, orb_range = evaluate_style_signal(clean_sym, style, risk_pct, pcr_val, pcr_sentiment, cf_yield, cf_sentiment)
         if setup:
             all_signals.append(setup)
         if style == focus_style:
@@ -349,7 +404,7 @@ if selected_ticker:
 
     if all_signals:
         signals_df = pd.DataFrame(all_signals)
-        st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
+        st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "Cash Flow Sentiment", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
 
     # Render Chart for Selected Focused Style
     if focused_data is not None and not focused_data.empty:
@@ -367,7 +422,6 @@ if selected_ticker:
             name="Price Candles"
         ))
 
-        # Fast/Slow Moving Average Lines
         if "EMA9" in display_chart_data.columns and "Scalping" in focus_style:
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA9"], line=dict(color="blue", width=1.5), name="9-EMA"))
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA21"], line=dict(color="orange", width=1.5), name="21-EMA"))
@@ -376,7 +430,6 @@ if selected_ticker:
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["SMA5"], line=dict(color="blue", width=1.5), name="5-SMA"))
             fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["SMA20"], line=dict(color="orange", width=1.5), name="20-SMA"))
 
-        # ORB Lines if Scalping
         if focus_style == "Scalping (15m ORB + 1m)" and focused_orb[0] and focused_orb[1]:
             fig.add_hline(y=focused_orb[0], line_dash="solid", line_color="orange", annotation_text=f"15m ORB High (${focused_orb[0]:.2f})", annotation_position="top left")
             fig.add_hline(y=focused_orb[1], line_dash="solid", line_color="orange", annotation_text=f"15m ORB Low (${focused_orb[1]:.2f})", annotation_position="bottom left")
