@@ -4,15 +4,18 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Top 10 Heavy Movers & Multi-Style Signal Dashboard", layout="wide")
+st.set_page_config(page_title="Quantitative Trading & Momentum Dashboard", layout="wide")
 
-WATCHLIST_TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
+# Active Watchlists
+US_HEAVY_WATCHLIST = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
+US_PENNY_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL"]
+CA_PENNY_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO"]
 
 # Sidebar Mode Navigation
 st.sidebar.header("Navigation")
 navigation_mode = st.sidebar.radio(
     "Choose Mode",
-    ["Scan Top 10 Heavy Volume Movers", "Manual Ticker Entry"]
+    ["Scan Top 10 Heavy Volume Movers", "Scan $5-$40 Momentum Stocks (US & CA)", "Manual Ticker Entry"]
 )
 
 def fetch_put_call_ratio(ticker_symbol):
@@ -87,7 +90,7 @@ def fetch_cash_flow_sentiment(ticker_symbol):
 
 
 @st.cache_data(ttl=300)
-def scan_top10_heavy_movers(ticker_list):
+def scan_top10_heavy_movers(ticker_list, min_price=0.0, max_price=10000.0):
     """Scans watchlist and ranks stocks based on RVOL, % Change, Share Float, and ATR(14)."""
     movers = []
     for sym in ticker_list:
@@ -103,6 +106,11 @@ def scan_top10_heavy_movers(ticker_list):
                 prev = df.iloc[-2]
 
                 price = float(latest["Close"])
+                
+                # Apply Price Range Filter
+                if price < min_price or price > max_price:
+                    continue
+
                 pct_change = ((price - float(prev["Close"])) / float(prev["Close"])) * 100.0
                 curr_volume = int(latest["Volume"])
 
@@ -160,6 +168,11 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     cfg = style_configs[style_name]
     data = yf.download(ticker_symbol, period=cfg["period"], interval=cfg["interval"], progress=False)
     
+    # Fallback logic for Canadian symbols if .TO fails or returns empty
+    if data.empty and "." in ticker_symbol:
+        fallback_sym = ticker_symbol.split(".")[0]
+        data = yf.download(fallback_sym, period=cfg["period"], interval=cfg["interval"], progress=False)
+
     if data.empty:
         return None, None, None
 
@@ -317,13 +330,13 @@ def find_top_market_opportunity(top_tickers):
     return best_candidate, best_direction, highest_consensus
 
 
-# BACKGROUND REFRESH FRAGMENT
+# BACKGROUND REFRESH FRAGMENT FOR HEAVY MOVERS
 @st.fragment(run_every="60s")
 def render_top10_screener():
     st.subheader("🔥 Top 10 Heavy Volume & Momentum Movers Screener")
     st.caption("Auto-refreshes in background every 60s | Evaluates RVOL, % Change, Volume, Float & ATR(14).")
 
-    movers_df = scan_top10_heavy_movers(WATCHLIST_TICKERS)
+    movers_df = scan_top10_heavy_movers(US_HEAVY_WATCHLIST)
 
     if not movers_df.empty:
         display_df = movers_df.copy()
@@ -344,24 +357,59 @@ def render_top10_screener():
         return ["NVDA"]
 
 
-# SCREENER SELECTION MODE
+# BACKGROUND REFRESH FRAGMENT FOR PENNY / SMALL CAP ($5-$40) STOCKS
+@st.fragment(run_every="60s")
+def render_penny_screener(market_choice):
+    st.subheader(f"💎 Top Momentum Stocks ($5 - $40 Range) — Market: {market_choice}")
+    st.caption("Filters high volume growth candidates strictly priced between $5 and $40.")
+
+    target_list = US_PENNY_WATCHLIST if market_choice == "US Market (NYSE/NASDAQ)" else CA_PENNY_WATCHLIST
+    movers_df = scan_top10_heavy_movers(target_list, min_price=5.0, max_price=40.0)
+
+    if not movers_df.empty:
+        display_df = movers_df.copy()
+        display_df["Rank"] = range(1, len(display_df) + 1)
+        display_df["Price"] = display_df["Price"].map(lambda x: f"${x:.2f}")
+        display_df["Change %"] = display_df["Change %"].map(lambda x: f"{x:+.2f}%")
+        display_df["Current Volume"] = display_df["Current Volume"].map(lambda x: f"{x:,}")
+        display_df["RVOL"] = display_df["RVOL"].map(lambda x: f"{x:.2f}x")
+        display_df["ATR (14)"] = display_df["ATR (14)"].map(lambda x: f"${x:.2f}")
+        display_df["ATR %"] = display_df["ATR %"].map(lambda x: f"{x:.2f}%")
+
+        display_df = display_df[["Rank", "Ticker", "Price", "Change %", "Current Volume", "RVOL", "ATR (14)", "ATR %", "Share Float"]]
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        return movers_df["Ticker"].tolist()
+    else:
+        st.warning(f"No qualifying stocks currently found between $5 and $40 for {market_choice}.")
+        return [target_list[0]]
+
+
+# NAVIGATION MODE ROUTING
 if navigation_mode == "Scan Top 10 Heavy Volume Movers":
     st.title("🔥 Real-Time Market Screener Mode")
     ticker_options = render_top10_screener()
     
-    # SINGLE GLOBAL MARKET ALERT BANNER (Checks all stocks in Top 10 list)
     opp_ticker, opp_dir, opp_score = find_top_market_opportunity(ticker_options)
     if opp_ticker and opp_ticker != st.session_state.get("selected_stock", ticker_options[0]):
         if opp_dir == "BUY":
-            st.success(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Top 10 Screener) has triggered a **{opp_score}/5 CONVICTION BUY SETUP**!")
+            st.success(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Screener) triggered a **{opp_score}/5 CONVICTION BUY SETUP**!")
         else:
-            st.error(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Top 10 Screener) has triggered a **{opp_score}/5 CONVICTION SELL SETUP**!")
+            st.error(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Screener) triggered a **{opp_score}/5 CONVICTION SELL SETUP**!")
 
     selected_ticker = st.selectbox("Select a Heavy Mover for Multi-Style Analysis:", ticker_options, index=0)
     st.session_state["selected_stock"] = selected_ticker
+
+elif navigation_mode == "Scan $5-$40 Momentum Stocks (US & CA)":
+    st.title("💎 $5–$40 High-Momentum Stock Screener")
+    market_choice = st.radio("Select Target Market", ["US Market (NYSE/NASDAQ)", "Canadian Market (TSX/TSXV)"], horizontal=True)
+    
+    ticker_options = render_penny_screener(market_choice)
+    selected_ticker = st.selectbox("Select a $5-$40 Stock for Multi-Style Analysis:", ticker_options, index=0)
+
 else:
     st.title("⚡ Manual Stock Signal & Chart Analyzer")
-    selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, PANW):", "PANW")
+    selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, PANW, SU.TO):", "SOUN")
 
 # Sidebar Controls
 focus_style = st.sidebar.selectbox(
