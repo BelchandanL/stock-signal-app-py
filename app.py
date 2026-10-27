@@ -8,14 +8,14 @@ st.set_page_config(page_title="Quantitative Trading & Momentum Dashboard", layou
 
 # Active Watchlists
 US_HEAVY_WATCHLIST = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
-US_PENNY_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL"]
-CA_PENNY_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO"]
+US_PENNY_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL", "SOFI", "RBLX", "SNAP", "OPEN", "NOK", "RPD", "SGRY", "EAF"]
+CA_PENNY_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO", "CCO.TO", "POW.TO"]
 
 # Sidebar Mode Navigation
 st.sidebar.header("Navigation")
 navigation_mode = st.sidebar.radio(
     "Choose Mode",
-    ["Scan Top 10 Heavy Volume Movers", "Scan $5-$40 Momentum Stocks (US & CA)", "Manual Ticker Entry"]
+    ["Scan Top 10 Heavy Volume Movers", "Scan $5-$100 Momentum Stocks (US & CA)", "Manual Ticker Entry"]
 )
 
 def fetch_put_call_ratio(ticker_symbol):
@@ -107,7 +107,7 @@ def scan_top10_heavy_movers(ticker_list, min_price=0.0, max_price=10000.0):
 
                 price = float(latest["Close"])
                 
-                # Apply Price Range Filter
+                # Apply Strict Price Filter
                 if price < min_price or price > max_price:
                     continue
 
@@ -168,7 +168,6 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     cfg = style_configs[style_name]
     data = yf.download(ticker_symbol, period=cfg["period"], interval=cfg["interval"], progress=False)
     
-    # Fallback logic for Canadian symbols if .TO fails or returns empty
     if data.empty and "." in ticker_symbol:
         fallback_sym = ticker_symbol.split(".")[0]
         data = yf.download(fallback_sym, period=cfg["period"], interval=cfg["interval"], progress=False)
@@ -357,14 +356,14 @@ def render_top10_screener():
         return ["NVDA"]
 
 
-# BACKGROUND REFRESH FRAGMENT FOR PENNY / SMALL CAP ($5-$40) STOCKS
+# BACKGROUND REFRESH FRAGMENT FOR PENNY / MID-CAP ($5-$100) STOCKS
 @st.fragment(run_every="60s")
 def render_penny_screener(market_choice):
-    st.subheader(f"💎 Top Momentum Stocks ($5 - $40 Range) — Market: {market_choice}")
-    st.caption("Filters high volume growth candidates strictly priced between $5 and $40.")
+    st.subheader(f"💎 Top Momentum Stocks ($5 - $100 Range) — Market: {market_choice}")
+    st.caption("Filters high volume growth candidates strictly priced between $5 and $100.")
 
     target_list = US_PENNY_WATCHLIST if market_choice == "US Market (NYSE/NASDAQ)" else CA_PENNY_WATCHLIST
-    movers_df = scan_top10_heavy_movers(target_list, min_price=5.0, max_price=40.0)
+    movers_df = scan_top10_heavy_movers(target_list, min_price=5.0, max_price=100.0)
 
     if not movers_df.empty:
         display_df = movers_df.copy()
@@ -381,7 +380,7 @@ def render_penny_screener(market_choice):
 
         return movers_df["Ticker"].tolist()
     else:
-        st.warning(f"No qualifying stocks currently found between $5 and $40 for {market_choice}.")
+        st.warning(f"No qualifying stocks currently found between $5 and $100 for {market_choice}.")
         return [target_list[0]]
 
 
@@ -400,12 +399,12 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers":
     selected_ticker = st.selectbox("Select a Heavy Mover for Multi-Style Analysis:", ticker_options, index=0)
     st.session_state["selected_stock"] = selected_ticker
 
-elif navigation_mode == "Scan $5-$40 Momentum Stocks (US & CA)":
-    st.title("💎 $5–$40 High-Momentum Stock Screener")
+elif navigation_mode == "Scan $5-$100 Momentum Stocks (US & CA)":
+    st.title("💎 $5–$100 High-Momentum Stock Screener")
     market_choice = st.radio("Select Target Market", ["US Market (NYSE/NASDAQ)", "Canadian Market (TSX/TSXV)"], horizontal=True)
     
     ticker_options = render_penny_screener(market_choice)
-    selected_ticker = st.selectbox("Select a $5-$40 Stock for Multi-Style Analysis:", ticker_options, index=0)
+    selected_ticker = st.selectbox("Select a $5-$100 Stock for Multi-Style Analysis:", ticker_options, index=0)
 
 else:
     st.title("⚡ Manual Stock Signal & Chart Analyzer")
