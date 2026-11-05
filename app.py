@@ -216,25 +216,33 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     bullish_score, bearish_score = 0, 0
     reasons = []
 
-    # ACCURATE REGULAR TRADING HOURS 15m OPENING RANGE (ORB) CALCULATION
+    # ACCURATE EST TIMEZONE CONVERSION & 9:30 AM OPENING RANGE (ORB) CALCULATION
     orb_high, orb_low = None, None
     if "Scalping" in style_name and not clean_data.empty:
-        latest_date = clean_data.index[-1].date()
-        today_data = clean_data[clean_data.index.date == latest_date]
-
-        # Filter strictly for 9:30 AM - 9:45 AM Regular Market Open
         try:
-            rth_opening = today_data.between_time("09:30", "09:45")
-        except Exception:
-            rth_opening = pd.DataFrame()
+            tz_data = clean_data.copy()
+            # Convert UTC timestamps to US/Eastern timezone
+            if tz_data.index.tz is None:
+                tz_data.index = tz_data.index.tz_localize("UTC").tz_convert("America/New_York")
+            else:
+                tz_data.index = tz_data.index.tz_convert("America/New_York")
 
-        if not rth_opening.empty:
-            orb_high = float(rth_opening["High"].max())
-            orb_low = float(rth_opening["Low"].min())
-        elif not today_data.empty:
-            first_15m = today_data.head(15)
-            orb_high = float(first_15m["High"].max())
-            orb_low = float(first_15m["Low"].min())
+            latest_date = tz_data.index[-1].date()
+            # Filter strictly for today's candles at or after 9:30 AM EST
+            today_rth = tz_data[(tz_data.index.date == latest_date) & (tz_data.index.hour >= 9)]
+
+            # Slicing the exact 9:30 AM - 9:45 AM EST range
+            rth_opening = today_rth.between_time("09:30", "09:45")
+
+            if not rth_opening.empty:
+                orb_high = float(rth_opening["High"].max())
+                orb_low = float(rth_opening["Low"].min())
+            elif not today_rth.empty:
+                first_15m = today_rth.head(15)
+                orb_high = float(first_15m["High"].max())
+                orb_low = float(first_15m["Low"].min())
+        except Exception:
+            orb_high, orb_low = None, None
 
         if orb_high and orb_low:
             if current_price > orb_high:
