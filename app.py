@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from tradingview_screener import Query, col
-from tradingview_ta import get_multiple_analysis, Interval
+from tradingview_ta import TA_Handler, Interval
 
 st.set_page_config(page_title="Quant TradingView Market Screener", layout="wide")
 
@@ -38,7 +38,7 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
     """
     Queries TradingView's backend scanner across the entire market dynamically.
-    No hardcoded stock arrays required.
+    Extracts the exact exchange directly for chart rendering.
     """
     try:
         q = (
@@ -54,9 +54,8 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
         )
         data = q.get_scanner_data()
         
-        if data is not None and len(data) > 0 and len(data[1]) > 0:
+        if data is not None and len(data) == 2 and not data[1].empty:
             df = data[1]
-            # Formats ticker key into EXCHANGESYM format (e.g. NASDAQ:NVDA)
             results = []
             for _, row in df.iterrows():
                 ticker_full = str(row.get('ticker', ''))
@@ -76,29 +75,41 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
                 })
             return pd.DataFrame(results)
     except Exception as e:
-        st.warning(f"Live Market Query Exception: {e}")
+        st.warning(f"Live Market Query Note: {e}")
     
     return pd.DataFrame()
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
-    """Fallback single ticker analysis engine for manual input or deep-dive."""
+    """
+    Reliable single-ticker lookup for manual entry and deep dives.
+    Sweeps exchanges (NASDAQ, NYSE, AMEX, TSX, TSXV) until valid indicator data is retrieved.
+    """
     clean_sym = symbol.replace(".TO", "").strip().upper()
-    screener = "canada" if ".TO" in symbol else "america"
-    exchanges_to_try = ["NASDAQ", "NYSE", "AMEX", "TSX", "TSXV"]
+    is_ca = ".TO" in symbol or symbol.endswith(".V")
+    
+    if is_ca:
+        exchanges_to_try = [("canada", "TSX"), ("canada", "TSXV")]
+    else:
+        exchanges_to_try = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX")]
 
-    for exch in exchanges_to_try:
-        tv_key = f"{exch}:{clean_sym}"
+    for screener, exch in exchanges_to_try:
         try:
-            res = get_multiple_analysis(screener=screener, interval=interval, symbols=[tv_key])
-            if res and res.get(tv_key) and hasattr(res[tv_key], "indicators"):
-                return res[tv_key], exch
+            handler = TA_Handler(
+                symbol=clean_sym,
+                screener=screener,
+                exchange=exch,
+                interval=interval
+            )
+            analysis = handler.get_analysis()
+            if analysis and hasattr(analysis, "indicators") and analysis.indicators:
+                return analysis, exch
         except Exception:
             continue
 
-    return None, "NASDAQ"
+    return None, "NASDAQ" if not is_ca else "TSX"
 
 def render_tradingview_widget(symbol="AMD", exchange="NASDAQ", interval_code="1"):
-    """Embeds TradingView's interactive chart widget using verified exchange."""
+    """Renders TradingView's interactive chart widget using the verified exchange."""
     clean_sym = symbol.replace(".TO", "").strip().upper()
     tv_symbol = f"{exchange}:{clean_sym}"
 
@@ -217,10 +228,15 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers (All US Market)":
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
         disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
         st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "RVOL"]], width="stretch", hide_index=True)
+        
+        # Build selection dict mapping symbol to detected exchange
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
+        exchange_lookup = dict(zip(movers_df["Ticker"], movers_df["Exchange"]))
+        selected_exchange = exchange_lookup.get(selected_ticker, "NASDAQ")
     else:
-        st.warning("No dynamic scan results returned. Enter ticker manually below.")
+        st.warning("Scanning market... enter ticker manually below if delayed.")
         selected_ticker = "NVDA"
+        selected_exchange = "NASDAQ"
 
 elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
     st.title("💎 $5–$100 High Momentum Market Screener")
@@ -236,14 +252,19 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
         disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
         st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "RVOL"]], width="stretch", hide_index=True)
+        
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
+        exchange_lookup = dict(zip(movers_df["Ticker"], movers_df["Exchange"]))
+        selected_exchange = exchange_lookup.get(selected_ticker, "NASDAQ")
     else:
         st.warning("No dynamic scan results returned for selected filters.")
-        selected_ticker = "SOUN" if "US" in market_choice else "BTE.TO"
+        selected_ticker = "SOUN" if "US" in market_choice else "BTE"
+        selected_exchange = "NASDAQ" if "US" in market_choice else "TSX"
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. NVDA, AMD, TSLA, SU.TO):", "NVDA").strip().upper()
+    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. NVDA, AMD, TSLA, SU):", "NVDA").strip().upper()
+    selected_exchange = None  # Force dynamic exchange resolution
 
 # ==========================================
 # QUANT ANALYSIS DISPLAY ENGINE
@@ -252,7 +273,10 @@ if selected_ticker:
     quant_setup, tv_code, active_exchange = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
 
     if quant_setup:
-        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker} ({active_exchange})")
+        # Use verified active_exchange if manual or fallback
+        final_exchange = active_exchange if active_exchange else selected_exchange
+        
+        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker} ({final_exchange})")
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Current Price", f"${quant_setup['Price']:.2f}")
@@ -283,6 +307,6 @@ if selected_ticker:
             trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
         st.subheader(f"📈 Real-Time TradingView Interactive Chart: {selected_ticker}")
-        render_tradingview_widget(selected_ticker, exchange=active_exchange, interval_code=tv_code)
+        render_tradingview_widget(selected_ticker, exchange=final_exchange, interval_code=tv_code)
     else:
         st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Check ticker spelling or exchange listing.")
