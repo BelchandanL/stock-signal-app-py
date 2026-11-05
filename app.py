@@ -3,7 +3,7 @@ import pandas as pd
 from tradingview_screener import Query, col
 from tradingview_ta import TA_Handler, Interval
 
-st.set_page_config(page_title="Quant TradingView Market Dashboard", layout="wide")
+st.set_page_config(page_title="7-Indicator Quant Trading Dashboard", layout="wide")
 
 # ==========================================
 # NAVIGATION & SIDEBAR CONTROLS
@@ -38,7 +38,7 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
     """
     Queries TradingView's backend scanner dynamically across US/CA markets.
-    Extracts the exact native exchange and pure ticker symbol without hardcoding.
+    Extracts the exact native exchange and pure ticker symbol.
     """
     try:
         q = (
@@ -58,7 +58,6 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             df = data[1]
             results = []
             for _, row in df.iterrows():
-                # Raw scanner ticker comes as EXCHANGE:SYMBOL (e.g. NASDAQ:INTC, NYSE:PLTR, OTC:INND, TSX:SU)
                 raw_ticker = str(row.get('ticker', row.get('name', ''))).strip().upper()
                 
                 if ":" in raw_ticker:
@@ -67,7 +66,6 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
                     detected_exchange = "NASDAQ" if market == "america" else "TSX"
                     pure_symbol = raw_ticker
 
-                # Clean Canadian dot extensions if present
                 clean_symbol = pure_symbol.replace(".TO", "").replace(".V", "").strip()
                 clean_exchange = detected_exchange.strip()
 
@@ -87,13 +85,11 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, preferred_exchange=None):
     """
-    Dynamic Multi-Exchange Resolver.
-    Checks preferred exchange first, then sweeps NASDAQ, NYSE, AMEX, TSX, TSXV, and OTC dynamically.
+    Dynamic Multi-Exchange Resolver for the 7 key indicators.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     is_ca = ".TO" in symbol or symbol.endswith(".V")
     
-    # Priority exchanges to sweep
     if preferred_exchange and preferred_exchange != "AUTO":
         screener_key = "canada" if preferred_exchange in ["TSX", "TSXV"] else "america"
         exchanges_to_try = [(screener_key, preferred_exchange)]
@@ -107,7 +103,6 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
             ("america", "OTC")
         ]
 
-    # Additional fallbacks in case preferred exchange fails
     fallback_exchanges = [("america", "NASDAQ"), ("america", "NYSE"), ("canada", "TSX"), ("america", "OTC")]
     for item in fallback_exchanges:
         if item not in exchanges_to_try:
@@ -127,9 +122,12 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
         except Exception:
             continue
 
-    # Fallback Synthetic Analysis Generator
+    # Fallback Synthesizer for high availability
     try:
-        q = Query().set_markets("canada" if is_ca else "america").select('close', 'high', 'low', 'RSI', 'MACD.macd', 'MACD.signal', 'EMA20', 'BB.upper', 'BB.lower', 'Ichimoku.BLine').where(col('name') == clean_sym)
+        q = Query().set_markets("canada" if is_ca else "america").select(
+            'close', 'high', 'low', 'RSI', 'MACD.macd', 'MACD.signal', 
+            'EMA20', 'SMA50', 'SMA200', 'BB.upper', 'BB.lower', 'Stoch.K', 'Stoch.D'
+        ).where(col('name') == clean_sym)
         _, df = q.get_scanner_data()
         if df is not None and not df.empty:
             row = df.iloc[0]
@@ -142,9 +140,12 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
                     "MACD.macd": float(row.get('MACD.macd', 0.1)),
                     "MACD.signal": float(row.get('MACD.signal', 0.05)),
                     "EMA20": float(row.get('EMA20', 1.0)),
+                    "SMA50": float(row.get('SMA50', 1.0)),
+                    "SMA200": float(row.get('SMA200', 1.0)),
                     "BB.upper": float(row.get('BB.upper', 1.02)),
                     "BB.lower": float(row.get('BB.lower', 0.98)),
-                    "Ichimoku.BLine": float(row.get('Ichimoku.BLine', 1.0))
+                    "Stoch.K": float(row.get('Stoch.K', 50.0)),
+                    "Stoch.D": float(row.get('Stoch.D', 50.0))
                 }
                 summary = {"RECOMMENDATION": "BUY" if float(row.get('RSI', 50)) > 50 else "SELL"}
             default_exch = preferred_exchange if preferred_exchange else ("TSX" if is_ca else "NASDAQ")
@@ -157,8 +158,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
 
 def render_tradingview_widget(symbol, exchange, interval_code="1"):
     """
-    Renders TradingView's official interactive chart widget using the dynamically detected exchange.
-    Format: EXACT_EXCHANGE:PURE_SYMBOL (e.g. NASDAQ:INTC, NYSE:PLTR, OTC:INND, TSX:SU)
+    Renders TradingView's official interactive chart widget with volume and technical overlays.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     clean_exch = str(exchange).strip().upper() if exchange else "NASDAQ"
@@ -166,7 +166,7 @@ def render_tradingview_widget(symbol, exchange, interval_code="1"):
     tv_symbol = f"{clean_exch}:{clean_sym}"
 
     tradingview_html = f"""
-    <div class="tradingview-widget-container" style="height:550px;width:100%">
+    <div class="tradingview-widget-container" style="height:580px;width:100%">
       <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
@@ -181,15 +181,18 @@ def render_tradingview_widget(symbol, exchange, interval_code="1"):
         "toolbar_bg": "#f1f3f6",
         "enable_publishing": false,
         "allow_symbol_change": true,
+        "details": true,
+        "hotlist": true,
+        "calendar": true,
         "container_id": "tradingview_chart"
       }});
       </script>
     </div>
     """
-    st.iframe(tradingview_html, height=560)
+    st.iframe(tradingview_html, height=590)
 
 # ==========================================
-# ADVANCED QUANT & PINE SCRIPT SYNTHESIS
+# 7-INDICATOR QUANT ENGINE
 # ==========================================
 def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_exchange=None):
     interval_map = {
@@ -213,19 +216,46 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
     summary = analysis.summary if hasattr(analysis, "summary") and analysis.summary else {}
 
     price = float(inds.get("close", 0.0))
-    high_price = float(inds.get("high", price * 1.02 if price > 0 else 0.01))
-    low_price = float(inds.get("low", price * 0.98 if price > 0 else 0.01))
+    high = float(inds.get("high", price * 1.02 if price > 0 else 0.01))
+    low = float(inds.get("low", price * 0.98 if price > 0 else 0.01))
 
+    # 1. RSI (14)
     rsi = float(inds.get("RSI", 50.0))
+    rsi_state = "Oversold (<30)" if rsi <= 30 else ("Overbought (>70)" if rsi >= 70 else f"Neutral ({rsi:.1f})")
+
+    # 2. Moving Averages (EMA20 vs SMA50/SMA200)
+    ema20 = float(inds.get("EMA20", price))
+    sma50 = float(inds.get("SMA50", price))
+    ma_trend = "Strong Uptrend (Price > EMA20 > SMA50)" if price > ema20 > sma50 else ("Downtrend Alignment" if price < ema20 else "Consolidation Range")
+
+    # 3. MACD (Line vs Signal)
     macd_val = float(inds.get("MACD.macd", 0.0))
     macd_signal = float(inds.get("MACD.signal", 0.0))
-    ema20 = float(inds.get("EMA20", price))
+    macd_state = "Bullish Crossover" if macd_val > macd_signal else "Bearish Momentum"
+
+    # 4. Bollinger Bands (Upper, Lower, Width)
     bb_upper = float(inds.get("BB.upper", price * 1.02 if price > 0 else 0.01))
     bb_lower = float(inds.get("BB.lower", price * 0.98 if price > 0 else 0.01))
-    ichimoku_base = float(inds.get("Ichimoku.BLine", price))
+    bb_pos = "Upper Band Squeeze" if price >= bb_upper else ("Lower Band Dip" if price <= bb_lower else "Mid-Band Channel")
 
+    # 5. Dynamic Fibonacci Retracement Levels
+    diff = max(high - low, 0.0001)
+    fib_382 = high - (diff * 0.382)
+    fib_500 = high - (diff * 0.500)
+    fib_618 = high - (diff * 0.618)
+    fib_state = f"50.0% Key Level: ${fib_500:.2f} (Golden Pocket: ${fib_618:.2f})"
+
+    # 6. Stochastic Oscillator (Stoch.K vs Stoch.D)
+    stoch_k = float(inds.get("Stoch.K", 50.0))
+    stoch_d = float(inds.get("Stoch.D", 50.0))
+    stoch_state = "Bullish Cross (%K > %D)" if stoch_k > stoch_d else "Bearish Cross (%K < %D)"
+
+    # 7. Volume Profile / Volume Weighted Value Area Proxy
+    vol_profile_poc = (high + low + price) / 3.0
+    vol_state = f"POC Node Proxy: ${vol_profile_poc:.2f}"
+
+    # Regimes and Signals
     tv_rec = str(summary.get("RECOMMENDATION", "NEUTRAL")).upper() if summary else "NEUTRAL"
-    
     if "BUY" in tv_rec:
         signal_direction = "BUY"
     elif "SELL" in tv_rec:
@@ -233,12 +263,7 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
     else:
         signal_direction = "BUY" if rsi >= 50 else "SELL"
 
-    # Quant Pine Script Approximations
-    smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= (low_price * 1.002) else "Order Block Resistance (Bearish)"
-    lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal) else "Bearish Feature Cluster"
-    hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
-
-    # Guaranteed Stop & Target Calculations
+    # Risk & Target Parameters
     stop_distance = max(price * (risk_tolerance / 100.0), 0.0001)
 
     if signal_direction == "BUY":
@@ -246,13 +271,13 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
         stop_loss = max(entry_price - stop_distance, 0.0001)
         target_1 = entry_price + (stop_distance * 1.5)
         target_2 = entry_price + (stop_distance * 3.0)
-        targets_reached = high_price >= target_2 and target_2 > 0
+        targets_reached = high >= target_2 and target_2 > 0
     else:
         entry_price = price
         stop_loss = entry_price + stop_distance
         target_1 = max(entry_price - (stop_distance * 1.5), 0.0001)
         target_2 = max(entry_price - (stop_distance * 3.0), 0.0001)
-        targets_reached = low_price <= target_2 and target_2 > 0
+        targets_reached = low <= target_2 and target_2 > 0
 
     quant_data = {
         "Ticker": clean_symbol,
@@ -264,13 +289,13 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
         "Target 1": target_1,
         "Target 2": target_2,
         "Targets Reached": targets_reached,
-        "RSI": rsi,
-        "MACD State": "Bullish Crossover" if macd_val > macd_signal else "Bearish Pressure",
-        "Supertrend / BB": "Upper Band Breakout" if price > bb_upper else ("Lower Band Oversold" if price < bb_lower else "Consolidation"),
-        "Ichimoku Kijun": "Above Base Line" if price > ichimoku_base else "Below Base Line",
-        "SMC Structure": smc_filter,
-        "Lorentzian Class": lorentzian_signal,
-        "Hull Suite": hull_trend
+        "RSI": rsi_state,
+        "MA Alignment": ma_trend,
+        "MACD Signal": macd_state,
+        "Bollinger Band": bb_pos,
+        "Fibonacci Levels": fib_state,
+        "Stochastic": stoch_state,
+        "Volume Profile POC": vol_state
     }
 
     return quant_data, tv_code, active_exchange, clean_symbol
@@ -345,32 +370,34 @@ if selected_ticker:
     if quant_setup:
         final_exchange = active_exchange if active_exchange else "NASDAQ"
         
-        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {clean_symbol} ({final_exchange})")
+        st.subheader(f"📊 7-Indicator Technical Matrix: {clean_symbol} ({final_exchange})")
 
         col1, col2, col3, col4 = st.columns(4)
         price_fmt = f"${quant_setup['Price']:.4f}" if quant_setup['Price'] < 1.0 else f"${quant_setup['Price']:.2f}"
         col1.metric("Current Price", price_fmt)
-        col2.metric("RSI (14)", f"{quant_setup['RSI']:.1f}")
-        col3.metric("TradingView Regime", quant_setup['Signal'])
+        col2.metric("TradingView Signal", quant_setup['Signal'])
+        col3.metric("RSI State", quant_setup['RSI'])
         col4.metric("Risk Percent", f"{risk_pct}%")
 
+        # Render 7 Requested Technical Indicators Grid
         script_df = pd.DataFrame([{
-            "Lorentzian Classification": quant_setup["Lorentzian Class"],
-            "Smart Money Concepts (SMC)": quant_setup["SMC Structure"],
-            "Hull Suite Trend": quant_setup["Hull Suite"],
-            "MACD State": quant_setup["MACD State"],
-            "Supertrend / Bollinger": quant_setup["Supertrend / BB"],
-            "Ichimoku Kijun Alignment": quant_setup["Ichimoku Kijun"]
+            "1. RSI (14)": quant_setup["RSI"],
+            "2. Moving Average (EMA/SMA)": quant_setup["MA Alignment"],
+            "3. MACD Regime": quant_setup["MACD Signal"],
+            "4. Bollinger Bands": quant_setup["Bollinger Band"],
+            "5. Fibonacci Retracement": quant_setup["Fibonacci Levels"],
+            "6. Stochastic Oscillator": quant_setup["Stochastic"],
+            "7. Volume Profile (POC)": quant_setup["Volume Profile POC"]
         }])
         st.dataframe(script_df, width="stretch", hide_index=True)
 
-        st.subheader("🎯 Optimal Trade Setup Execution")
+        st.subheader("🎯 Risk & Target Calculation Engine")
 
         if quant_setup["Targets Reached"]:
-            st.info(f"🚫 **Trade Setup Suppressed for {clean_symbol}:** The primary profit targets (Target 1 / Target 2) have already been met during this session. Execution parameters disabled to prevent chasing.")
+            st.info(f"🚫 **Trade Setup Suppressed for {clean_symbol}:** Profit targets already met during this session.")
         else:
             trade_cols = st.columns(5)
-            trade_cols[0].metric("Suggested Action", quant_setup["Signal"])
+            trade_cols[0].metric("Action", quant_setup["Signal"])
             
             e_fmt = f"${quant_setup['Entry']:.4f}" if quant_setup['Entry'] < 1.0 else f"${quant_setup['Entry']:.2f}"
             sl_fmt = f"${quant_setup['Stop Loss']:.4f}" if quant_setup['Stop Loss'] < 1.0 else f"${quant_setup['Stop Loss']:.2f}"
@@ -382,7 +409,7 @@ if selected_ticker:
             trade_cols[3].metric("Target 1 (1.5x Risk)", t1_fmt)
             trade_cols[4].metric("Target 2 (3.0x Risk)", t2_fmt)
 
-        st.subheader(f"📈 Real-Time TradingView Interactive Chart: {clean_symbol}")
+        st.subheader(f"📈 Real-Time Interactive Chart: {clean_symbol}")
         render_tradingview_widget(clean_symbol, exchange=final_exchange, interval_code=tv_code)
     else:
         st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Please verify the ticker symbol.")
