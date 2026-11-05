@@ -3,7 +3,7 @@ import pandas as pd
 from tradingview_screener import Query, col
 from tradingview_ta import TA_Handler, Interval
 
-st.set_page_config(page_title="Quant TradingView Market Screener", layout="wide")
+st.set_page_config(page_title="Quant TradingView Market Dashboard", layout="wide")
 
 # ==========================================
 # NAVIGATION & SIDEBAR CONTROLS
@@ -37,8 +37,8 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 @st.cache_data(ttl=120)
 def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
     """
-    Queries TradingView's backend scanner across the entire market dynamically.
-    Extracts the exact exchange directly for chart rendering.
+    Queries TradingView's backend scanner dynamically across the entire market.
+    Cleanly extracts ticker, exchange, volume, and price data.
     """
     try:
         q = (
@@ -52,22 +52,20 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             .order_by('volume', ascending=False)
             .limit(limit)
         )
-        data = q.get_scanner_data()
+        total_count, df = q.get_scanner_data()
         
-        if data is not None and len(data) == 2 and not data[1].empty:
-            df = data[1]
+        if df is not None and not df.empty:
             results = []
             for _, row in df.iterrows():
-                ticker_full = str(row.get('ticker', ''))
+                ticker_full = str(row.get('ticker', row.get('name', '')))
                 if ":" in ticker_full:
                     exchange, sym = ticker_full.split(":", 1)
                 else:
                     exchange, sym = ("NASDAQ" if market == "america" else "TSX"), ticker_full
 
                 results.append({
-                    "Ticker": sym,
-                    "Exchange": exchange,
-                    "Full_TV_Key": f"{exchange}:{sym}",
+                    "Ticker": sym.upper(),
+                    "Exchange": exchange.upper(),
                     "Price": float(row.get('close', 0.0)),
                     "Change %": float(row.get('change', 0.0)),
                     "Volume": int(row.get('volume', 0)),
@@ -75,16 +73,17 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
                 })
             return pd.DataFrame(results)
     except Exception as e:
-        st.warning(f"Live Market Query Note: {e}")
+        st.warning(f"Market Scan Note: {e}")
     
     return pd.DataFrame()
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
     """
-    Reliable single-ticker lookup for manual entry and deep dives.
-    Sweeps exchanges (NASDAQ, NYSE, AMEX, TSX, TSXV) until valid indicator data is retrieved.
+    Reliable single-ticker lookup wrapper.
+    Tries multiple exchanges (NASDAQ, NYSE, AMEX, TSX, TSXV) until valid indicators are found.
     """
-    clean_sym = symbol.replace(".TO", "").strip().upper()
+    # Clean ticker string from any user inputs
+    clean_sym = symbol.split(":")[-1].replace(".TO", "").strip().upper()
     is_ca = ".TO" in symbol or symbol.endswith(".V")
     
     if is_ca:
@@ -102,15 +101,15 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
             )
             analysis = handler.get_analysis()
             if analysis and hasattr(analysis, "indicators") and analysis.indicators:
-                return analysis, exch
+                return analysis, exch, clean_sym
         except Exception:
             continue
 
-    return None, "NASDAQ" if not is_ca else "TSX"
+    return None, ("NASDAQ" if not is_ca else "TSX"), clean_sym
 
 def render_tradingview_widget(symbol="AMD", exchange="NASDAQ", interval_code="1"):
-    """Renders TradingView's interactive chart widget using the verified exchange."""
-    clean_sym = symbol.replace(".TO", "").strip().upper()
+    """Embeds TradingView's interactive chart widget using the verified exchange."""
+    clean_sym = symbol.split(":")[-1].replace(".TO", "").strip().upper()
     tv_symbol = f"{exchange}:{clean_sym}"
 
     tradingview_html = f"""
@@ -148,13 +147,13 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     }
 
     tv_interval, tv_code = interval_map[style_name]
-    analysis, active_exchange = fetch_single_tv_analysis(ticker_symbol, interval=tv_interval)
+    analysis, active_exchange, clean_symbol = fetch_single_tv_analysis(ticker_symbol, interval=tv_interval)
 
     if not analysis:
-        return None, tv_code, active_exchange
+        return None, tv_code, active_exchange, clean_symbol
 
-    inds = analysis.indicators
-    summary = analysis.summary
+    inds = analysis.indicators if hasattr(analysis, "indicators") and analysis.indicators else {}
+    summary = analysis.summary if hasattr(analysis, "summary") and analysis.summary else {}
 
     price = float(inds.get("close", 0.0))
     high_price = float(inds.get("high", price))
@@ -169,11 +168,11 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     ichimoku_base = float(inds.get("Ichimoku.BLine", price))
 
     tv_rec = summary.get("RECOMMENDATION", "NEUTRAL") if summary else "NEUTRAL"
-    signal_direction = "BUY" if "BUY" in tv_rec else ("SELL" if "SELL" in tv_rec else "NEUTRAL")
+    signal_direction = "BUY" if "BUY" in str(tv_rec) else ("SELL" if "SELL" in str(tv_rec) else "NEUTRAL")
 
-    # Quant Pine Script Logic Approximations
+    # Quant Pine Script Approximations
     smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= (low_price * 1.002) else "Order Block Resistance (Bearish)"
-    lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in tv_rec) else "Bearish Feature Cluster"
+    lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in str(tv_rec)) else "Bearish Feature Cluster"
     hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
 
     stop_distance = price * (risk_tolerance / 100.0)
@@ -183,16 +182,16 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
         stop_loss = entry_price - stop_distance
         target_1 = entry_price + (stop_distance * 1.5)
         target_2 = entry_price + (stop_distance * 3.0)
-        targets_reached = high_price >= target_2
+        targets_reached = high_price >= target_2 and target_2 > 0
     else:
         entry_price = price
         stop_loss = entry_price + stop_distance
         target_1 = entry_price - (stop_distance * 1.5)
         target_2 = entry_price - (stop_distance * 3.0)
-        targets_reached = low_price <= target_2
+        targets_reached = low_price <= target_2 and target_2 > 0
 
     quant_data = {
-        "Ticker": ticker_symbol,
+        "Ticker": clean_symbol,
         "Exchange": active_exchange,
         "Signal": signal_direction,
         "Price": price,
@@ -210,7 +209,7 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
         "Hull Suite": hull_trend
     }
 
-    return quant_data, tv_code, active_exchange
+    return quant_data, tv_code, active_exchange, clean_symbol
 
 # ==========================================
 # MAIN DASHBOARD ROUTING
@@ -229,12 +228,11 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers (All US Market)":
         disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
         st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "RVOL"]], width="stretch", hide_index=True)
         
-        # Build selection dict mapping symbol to detected exchange
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
         exchange_lookup = dict(zip(movers_df["Ticker"], movers_df["Exchange"]))
         selected_exchange = exchange_lookup.get(selected_ticker, "NASDAQ")
     else:
-        st.warning("Scanning market... enter ticker manually below if delayed.")
+        st.info("Market scanner refreshing... select or enter a ticker below.")
         selected_ticker = "NVDA"
         selected_exchange = "NASDAQ"
 
@@ -257,26 +255,25 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
         exchange_lookup = dict(zip(movers_df["Ticker"], movers_df["Exchange"]))
         selected_exchange = exchange_lookup.get(selected_ticker, "NASDAQ")
     else:
-        st.warning("No dynamic scan results returned for selected filters.")
+        st.info("No stocks found matching exact filter criteria right now.")
         selected_ticker = "SOUN" if "US" in market_choice else "BTE"
         selected_exchange = "NASDAQ" if "US" in market_choice else "TSX"
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
     selected_ticker = st.text_input("Enter Ticker Symbol (e.g. NVDA, AMD, TSLA, SU):", "NVDA").strip().upper()
-    selected_exchange = None  # Force dynamic exchange resolution
+    selected_exchange = None
 
 # ==========================================
 # QUANT ANALYSIS DISPLAY ENGINE
 # ==========================================
 if selected_ticker:
-    quant_setup, tv_code, active_exchange = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
+    quant_setup, tv_code, active_exchange, clean_symbol = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
 
     if quant_setup:
-        # Use verified active_exchange if manual or fallback
-        final_exchange = active_exchange if active_exchange else selected_exchange
+        final_exchange = active_exchange if active_exchange else "NASDAQ"
         
-        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker} ({final_exchange})")
+        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {clean_symbol} ({final_exchange})")
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Current Price", f"${quant_setup['Price']:.2f}")
@@ -297,7 +294,7 @@ if selected_ticker:
         st.subheader("🎯 Optimal Trade Setup Execution")
 
         if quant_setup["Targets Reached"]:
-            st.info(f"🚫 **Trade Setup Suppressed for {selected_ticker}:** The primary profit targets (Target 1 / Target 2) have already been met during this session. Execution parameters disabled to prevent chasing.")
+            st.info(f"🚫 **Trade Setup Suppressed for {clean_symbol}:** The primary profit targets (Target 1 / Target 2) have already been met during this session. Execution parameters disabled to prevent chasing.")
         else:
             trade_cols = st.columns(5)
             trade_cols[0].metric("Suggested Action", quant_setup["Signal"])
@@ -306,7 +303,7 @@ if selected_ticker:
             trade_cols[3].metric("Target 1 (1.5x Risk)", f"${quant_setup['Target 1']:.2f}")
             trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
-        st.subheader(f"📈 Real-Time TradingView Interactive Chart: {selected_ticker}")
-        render_tradingview_widget(selected_ticker, exchange=final_exchange, interval_code=tv_code)
+        st.subheader(f"📈 Real-Time TradingView Interactive Chart: {clean_symbol}")
+        render_tradingview_widget(clean_symbol, exchange=final_exchange, interval_code=tv_code)
     else:
-        st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Check ticker spelling or exchange listing.")
+        st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Please verify the ticker symbol.")
