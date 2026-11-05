@@ -178,6 +178,15 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
 
+    # FORCE TIMEZONE TO US/EASTERN IMMEDIATELY TO ENSURE TODAY'S DATE IS ACCURATE
+    try:
+        if data.index.tz is None:
+            data.index = data.index.tz_localize("UTC").tz_convert("America/New_York")
+        else:
+            data.index = data.index.tz_convert("America/New_York")
+    except Exception:
+        pass
+
     data["SMA5"] = data["Close"].rolling(5).mean()
     data["SMA20"] = data["Close"].rolling(20).mean()
     data["SMA50"] = data["Close"].rolling(50).mean()
@@ -216,31 +225,25 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     bullish_score, bearish_score = 0, 0
     reasons = []
 
-    # ACCURATE EST TIMEZONE CONVERSION & 9:30 AM OPENING RANGE (ORB) CALCULATION
+    # GUARANTEED TODAY'S 15-MINUTE OPENING RANGE (ORB) CALCULATION (09:30 AM - 09:45 AM EST)
     orb_high, orb_low = None, None
     if "Scalping" in style_name and not clean_data.empty:
         try:
-            tz_data = clean_data.copy()
-            # Convert UTC timestamps to US/Eastern timezone
-            if tz_data.index.tz is None:
-                tz_data.index = tz_data.index.tz_localize("UTC").tz_convert("America/New_York")
-            else:
-                tz_data.index = tz_data.index.tz_convert("America/New_York")
+            # 1. Identify today's exact date from the latest candle
+            latest_trading_day = clean_data.index.max().date()
+            today_bars = clean_data[clean_data.index.date == latest_trading_day]
 
-            latest_date = tz_data.index[-1].date()
-            # Filter strictly for today's candles at or after 9:30 AM EST
-            today_rth = tz_data[(tz_data.index.date == latest_date) & (tz_data.index.hour >= 9)]
+            # 2. Extract strictly candles between 09:30 AM and 09:45 AM EST today
+            orb_window = today_bars.between_time("09:30", "09:45")
 
-            # Slicing the exact 9:30 AM - 9:45 AM EST range
-            rth_opening = today_rth.between_time("09:30", "09:45")
-
-            if not rth_opening.empty:
-                orb_high = float(rth_opening["High"].max())
-                orb_low = float(rth_opening["Low"].min())
-            elif not today_rth.empty:
-                first_15m = today_rth.head(15)
-                orb_high = float(first_15m["High"].max())
-                orb_low = float(first_15m["Low"].min())
+            if not orb_window.empty:
+                orb_high = float(orb_window["High"].max())
+                orb_low = float(orb_window["Low"].min())
+            elif not today_bars.empty:
+                # Fallback: First 15 candles of today's market session
+                first_15 = today_bars.head(15)
+                orb_high = float(first_15["High"].max())
+                orb_low = float(first_15["Low"].min())
         except Exception:
             orb_high, orb_low = None, None
 
