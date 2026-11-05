@@ -1,15 +1,9 @@
 import streamlit as st
 import pandas as pd
-from tradingview_ta import TA_Handler, Interval, Exchange
+from tradingview_screener import Query, col
+from tradingview_ta import get_multiple_analysis, Interval
 
-st.set_page_config(page_title="Quant TradingView Dashboard", layout="wide")
-
-# ==========================================
-# WATCHLIST DEFINITIONS
-# ==========================================
-US_HEAVY_WATCHLIST = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
-US_MOMENTUM_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL", "SOFI", "RBLX", "SNAP", "OPEN", "NOK", "RPD"]
-CA_MOMENTUM_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO", "CCO.TO", "POW.TO"]
+st.set_page_config(page_title="Quant TradingView Market Screener", layout="wide")
 
 # ==========================================
 # NAVIGATION & SIDEBAR CONTROLS
@@ -19,7 +13,7 @@ st.sidebar.title("🎯 Control Panel")
 navigation_mode = st.sidebar.radio(
     "Navigation Mode",
     [
-        "Scan Top 10 Heavy Volume Movers",
+        "Scan Top 10 Heavy Volume Movers (All US Market)",
         "Scan $5–$100 Momentum Stocks (US & CA)",
         "Manual Ticker Entry"
     ]
@@ -38,32 +32,70 @@ trading_style = st.sidebar.selectbox(
 risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
 
 # ==========================================
-# RESILIENT TRADINGVIEW DATA ENGINE
+# DYNAMIC MARKET-WIDE SCANNER ENGINE
 # ==========================================
-def fetch_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
-    """Dynamically checks across exchanges (NASDAQ, NYSE, AMEX, TSX, TSXV) to ensure reliable retrieval."""
-    clean_sym = symbol.replace(".TO", "").strip().upper()
-    
-    if ".TO" in symbol:
-        exchanges_to_check = [("canada", "TSX"), ("canada", "TSXV")]
-    else:
-        exchanges_to_check = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX")]
-
-    for screener, exchange in exchanges_to_check:
-        try:
-            handler = TA_Handler(
-                symbol=clean_sym,
-                screener=screener,
-                exchange=exchange,
-                interval=interval
+@st.cache_data(ttl=120)
+def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
+    """
+    Queries TradingView's backend scanner across the entire market dynamically.
+    No hardcoded stock arrays required.
+    """
+    try:
+        q = (
+            Query()
+            .set_markets(market)
+            .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
+            .where(
+                col('close').between(min_price, max_price),
+                col('volume') > 500000
             )
-            analysis = handler.get_analysis()
-            if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
-                return analysis, exchange
+            .order_by('volume', ascending=False)
+            .limit(limit)
+        )
+        data = q.get_scanner_data()
+        
+        if data is not None and len(data) > 0 and len(data[1]) > 0:
+            df = data[1]
+            # Formats ticker key into EXCHANGESYM format (e.g. NASDAQ:NVDA)
+            results = []
+            for _, row in df.iterrows():
+                ticker_full = str(row.get('ticker', ''))
+                if ":" in ticker_full:
+                    exchange, sym = ticker_full.split(":", 1)
+                else:
+                    exchange, sym = ("NASDAQ" if market == "america" else "TSX"), ticker_full
+
+                results.append({
+                    "Ticker": sym,
+                    "Exchange": exchange,
+                    "Full_TV_Key": f"{exchange}:{sym}",
+                    "Price": float(row.get('close', 0.0)),
+                    "Change %": float(row.get('change', 0.0)),
+                    "Volume": int(row.get('volume', 0)),
+                    "RVOL": float(row.get('relative_volume_10d_calc', 1.0))
+                })
+            return pd.DataFrame(results)
+    except Exception as e:
+        st.warning(f"Live Market Query Exception: {e}")
+    
+    return pd.DataFrame()
+
+def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
+    """Fallback single ticker analysis engine for manual input or deep-dive."""
+    clean_sym = symbol.replace(".TO", "").strip().upper()
+    screener = "canada" if ".TO" in symbol else "america"
+    exchanges_to_try = ["NASDAQ", "NYSE", "AMEX", "TSX", "TSXV"]
+
+    for exch in exchanges_to_try:
+        tv_key = f"{exch}:{clean_sym}"
+        try:
+            res = get_multiple_analysis(screener=screener, interval=interval, symbols=[tv_key])
+            if res and res.get(tv_key) and hasattr(res[tv_key], "indicators"):
+                return res[tv_key], exch
         except Exception:
             continue
 
-    return None, None
+    return None, "NASDAQ"
 
 def render_tradingview_widget(symbol="AMD", exchange="NASDAQ", interval_code="1"):
     """Embeds TradingView's interactive chart widget using verified exchange."""
@@ -105,16 +137,15 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     }
 
     tv_interval, tv_code = interval_map[style_name]
-    analysis, active_exchange = fetch_tv_analysis(ticker_symbol, interval=tv_interval)
+    analysis, active_exchange = fetch_single_tv_analysis(ticker_symbol, interval=tv_interval)
 
     if not analysis:
-        return None, tv_code, None
+        return None, tv_code, active_exchange
 
     inds = analysis.indicators
     summary = analysis.summary
 
     price = float(inds.get("close", 0.0))
-    open_price = float(inds.get("open", price))
     high_price = float(inds.get("high", price))
     low_price = float(inds.get("low", price))
 
@@ -126,15 +157,14 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     bb_lower = float(inds.get("BB.lower", price * 0.98))
     ichimoku_base = float(inds.get("Ichimoku.BLine", price))
 
-    tv_rec = summary.get("RECOMMENDATION", "NEUTRAL")
+    tv_rec = summary.get("RECOMMENDATION", "NEUTRAL") if summary else "NEUTRAL"
     signal_direction = "BUY" if "BUY" in tv_rec else ("SELL" if "SELL" in tv_rec else "NEUTRAL")
 
-    # Quant Pine Script Approximations
+    # Quant Pine Script Logic Approximations
     smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= (low_price * 1.002) else "Order Block Resistance (Bearish)"
     lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in tv_rec) else "Bearish Feature Cluster"
     hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
 
-    # Stop & Target Calculation
     stop_distance = price * (risk_tolerance / 100.0)
 
     if signal_direction == "BUY":
@@ -172,76 +202,44 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     return quant_data, tv_code, active_exchange
 
 # ==========================================
-# SCREENER ENGINE
-# ==========================================
-@st.cache_data(ttl=180)
-def scan_tickers(ticker_list, min_price=0.0, max_price=10000.0):
-    results = []
-    for sym in ticker_list:
-        try:
-            analysis, exchange = fetch_tv_analysis(sym, interval=Interval.INTERVAL_1_DAY)
-            if not analysis:
-                continue
-            inds = analysis.indicators
-            price = float(inds.get("close", 0.0))
-            if price < min_price or price > max_price:
-                continue
-            
-            change = float(inds.get("change", 0.0))
-            volume = int(inds.get("volume", 0))
-            atr = float(inds.get("Volatility.D", price * 0.02))
-
-            results.append({
-                "Ticker": sym,
-                "Exchange": exchange,
-                "Price": price,
-                "Change %": change,
-                "Volume": volume,
-                "ATR": atr,
-                "Score": abs(change) * (volume / 1e6)
-            })
-        except Exception:
-            continue
-
-    df = pd.DataFrame(results)
-    if not df.empty:
-        df = df.sort_values(by="Score", ascending=False).head(10).reset_index(drop=True)
-    return df
-
-# ==========================================
 # MAIN DASHBOARD ROUTING
 # ==========================================
-if navigation_mode == "Scan Top 10 Heavy Volume Movers":
-    st.title("🔥 Top 10 Heavy Volume Movers (TradingView Scanner)")
-    movers_df = scan_tickers(US_HEAVY_WATCHLIST)
+if navigation_mode == "Scan Top 10 Heavy Volume Movers (All US Market)":
+    st.title("🔥 Top 10 Heavy Volume Movers (Dynamic US Market Scan)")
+    st.caption("Scans entire US stock market dynamically via TradingView official scanner.")
+    
+    movers_df = scan_live_market(market="america", limit=10)
     
     if not movers_df.empty:
         disp = movers_df.copy()
         disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
-        disp["ATR"] = disp["ATR"].map(lambda x: f"${x:.2f}")
-        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "ATR"]], width="stretch", hide_index=True)
+        disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
+        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "RVOL"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
+        st.warning("No dynamic scan results returned. Enter ticker manually below.")
         selected_ticker = "NVDA"
 
 elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
-    st.title("💎 $5–$100 High Momentum Screener (US & CA)")
-    market_choice = st.radio("Target Market", ["US Market (NYSE/NASDAQ)", "Canadian Market (TSX/TSXV)"], horizontal=True)
+    st.title("💎 $5–$100 High Momentum Market Screener")
+    market_choice = st.radio("Target Market", ["US Market (NYSE/NASDAQ/AMEX)", "Canadian Market (TSX/TSXV)"], horizontal=True)
     
-    watchlist = US_MOMENTUM_WATCHLIST if "US" in market_choice else CA_MOMENTUM_WATCHLIST
-    movers_df = scan_tickers(watchlist, min_price=5.0, max_price=100.0)
+    tv_market_key = "america" if "US" in market_choice else "canada"
+    movers_df = scan_live_market(market=tv_market_key, min_price=5.0, max_price=100.0, limit=10)
 
     if not movers_df.empty:
         disp = movers_df.copy()
         disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
-        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume"]], width="stretch", hide_index=True)
+        disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
+        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "RVOL"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
-        selected_ticker = "SOUN"
+        st.warning("No dynamic scan results returned for selected filters.")
+        selected_ticker = "SOUN" if "US" in market_choice else "BTE.TO"
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
@@ -275,7 +273,7 @@ if selected_ticker:
         st.subheader("🎯 Optimal Trade Setup Execution")
 
         if quant_setup["Targets Reached"]:
-            st.info(f"🚫 **Trade Setup Suppressed for {selected_ticker}:** The primary intraday profit targets (Target 1 / Target 2) have already been reached during this session. No new execution parameters generated.")
+            st.info(f"🚫 **Trade Setup Suppressed for {selected_ticker}:** The primary profit targets (Target 1 / Target 2) have already been met during this session. Execution parameters disabled to prevent chasing.")
         else:
             trade_cols = st.columns(5)
             trade_cols[0].metric("Suggested Action", quant_setup["Signal"])
