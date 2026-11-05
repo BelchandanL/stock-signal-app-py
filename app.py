@@ -37,8 +37,8 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 @st.cache_data(ttl=120)
 def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
     """
-    Queries TradingView's backend scanner dynamically across the entire market.
-    Extracts ticker, verified exchange, volume, and price data.
+    Queries TradingView's backend scanner dynamically across US/CA markets.
+    Extracts clean ticker, verified exchange, volume, and price data.
     """
     try:
         q = (
@@ -47,7 +47,7 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
             .where(
                 col('close').between(min_price, max_price),
-                col('volume') > 100000
+                col('volume') > 50000
             )
             .order_by('volume', ascending=False)
             .limit(limit)
@@ -80,16 +80,16 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
     """
-    Comprehensive Multi-Exchange Resolver.
+    Bulletproof Multi-Exchange Resolver.
     Sweeps NASDAQ, NYSE, AMEX, OTC, TSX, and TSXV until valid indicator data is found.
     """
-    clean_sym = symbol.split(":")[-1].replace(".TO", "").strip().upper()
-    is_ca = ".TO" in symbol or symbol.endswith(".V")
+    clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
+    is_ca = ".TO" in symbol or symbol.endswith(".V") or symbol in ["BTE", "LUN", "ATH", "CVE", "ARX", "DML", "FM", "SU", "WCP"]
     
     if is_ca:
         exchanges_to_try = [("canada", "TSX"), ("canada", "TSXV")]
     else:
-        # Sweeps US exchanges including OTC Markets for penny/microcaps like INND
+        # Include OTC Markets for sub-penny/microcap stocks like INND
         exchanges_to_try = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX"), ("america", "OTC")]
 
     for screener, exch in exchanges_to_try:
@@ -114,16 +114,16 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
             row = df.iloc[0]
             class SyntheticAnalysis:
                 indicators = {
-                    "close": float(row.get('close', 0.01)),
-                    "high": float(row.get('high', 0.012)),
-                    "low": float(row.get('low', 0.008)),
+                    "close": float(row.get('close', 1.0)),
+                    "high": float(row.get('high', 1.05)),
+                    "low": float(row.get('low', 0.95)),
                     "RSI": float(row.get('RSI', 50.0)),
-                    "MACD.macd": float(row.get('MACD.macd', 0.001)),
-                    "MACD.signal": float(row.get('MACD.signal', 0.0005)),
-                    "EMA20": float(row.get('EMA20', 0.01)),
-                    "BB.upper": float(row.get('BB.upper', 0.011)),
-                    "BB.lower": float(row.get('BB.lower', 0.009)),
-                    "Ichimoku.BLine": float(row.get('Ichimoku.BLine', 0.01))
+                    "MACD.macd": float(row.get('MACD.macd', 0.1)),
+                    "MACD.signal": float(row.get('MACD.signal', 0.05)),
+                    "EMA20": float(row.get('EMA20', 1.0)),
+                    "BB.upper": float(row.get('BB.upper', 1.02)),
+                    "BB.lower": float(row.get('BB.lower', 0.98)),
+                    "Ichimoku.BLine": float(row.get('Ichimoku.BLine', 1.0))
                 }
                 summary = {"RECOMMENDATION": "BUY" if float(row.get('RSI', 50)) > 50 else "SELL"}
             return SyntheticAnalysis(), ("TSX" if is_ca else "OTC"), clean_sym
@@ -137,9 +137,9 @@ def render_tradingview_widget(symbol="INND", exchange="OTC", interval_code="1"):
     Renders TradingView's official interactive chart widget.
     Guarantees correct prefix mapping for OTC, NASDAQ, NYSE, AMEX, TSX, and TSXV.
     """
-    clean_sym = symbol.split(":")[-1].replace(".TO", "").strip().upper()
+    clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     
-    # Force OTC mapping for micro-penny stocks if missed
+    # Auto-map known OTC tickers if exchange was misidentified
     if clean_sym in ["INND", "PHIL", "EEENF", "AABB", "TSNP", "SANW"]:
         exchange = "OTC"
 
@@ -214,7 +214,7 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal) else "Bearish Feature Cluster"
     hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
 
-    # Risk-Based Stop & Target Calculation Engine
+    # Always generate Execution Targets using Risk % Selector
     stop_distance = max(price * (risk_tolerance / 100.0), 0.0001)
 
     if signal_direction == "BUY":
@@ -340,7 +340,6 @@ if selected_ticker:
             trade_cols = st.columns(5)
             trade_cols[0].metric("Suggested Action", quant_setup["Signal"])
             
-            # Format decimals dynamically for penny/sub-dollar stocks
             e_fmt = f"${quant_setup['Entry']:.4f}" if quant_setup['Entry'] < 1.0 else f"${quant_setup['Entry']:.2f}"
             sl_fmt = f"${quant_setup['Stop Loss']:.4f}" if quant_setup['Stop Loss'] < 1.0 else f"${quant_setup['Stop Loss']:.2f}"
             t1_fmt = f"${quant_setup['Target 1']:.4f}" if quant_setup['Target 1'] < 1.0 else f"${quant_setup['Target 1']:.2f}"
