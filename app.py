@@ -1,519 +1,307 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+import streamlit.components.v1 as components
+from tradingview_ta import TA_Handler, Interval, Exchange
 
-st.set_page_config(page_title="Quantitative Trading & Momentum Dashboard", layout="wide")
+st.set_page_config(page_title="Quant TradingView Dashboard", layout="wide")
 
-# Active Watchlists
+# ==========================================
+# WATCHLIST DEFINITIONS
+# ==========================================
 US_HEAVY_WATCHLIST = ["NVDA", "TSLA", "AMD", "AAPL", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR", "SPY", "QQQ", "SMCI", "COIN", "MARA", "BA", "BABA", "ARM"]
-US_PENNY_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL", "SOFI", "RBLX", "SNAP", "OPEN", "NOK", "RPD", "SGRY", "EAF"]
-CA_PENNY_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO", "CCO.TO", "POW.TO"]
+US_MOMENTUM_WATCHLIST = ["SOUN", "BBAI", "PLUG", "LCID", "RIG", "CLSK", "BITF", "HUT", "DNA", "RXRX", "IONQ", "LAZR", "NIO", "RUN", "TELL", "SOFI", "RBLX", "SNAP", "OPEN", "NOK", "RPD"]
+CA_MOMENTUM_WATCHLIST = ["BTE.TO", "LUN.TO", "ATH.TO", "CVE.TO", "ARX.TO", "DML.TO", "FM.TO", "TLG.TO", "HBM.TO", "SU.TO", "WCP.TO", "MEG.TO", "CCO.TO", "POW.TO"]
 
-# Sidebar Mode Navigation
-st.sidebar.header("Navigation")
+# ==========================================
+# NAVIGATION & SIDEBAR CONTROLS
+# ==========================================
+st.sidebar.title("🎯 Control Panel")
+
 navigation_mode = st.sidebar.radio(
-    "Choose Mode",
-    ["Scan Top 10 Heavy Volume Movers", "Scan $5-$100 Momentum Stocks (US & CA)", "Manual Ticker Entry"]
+    "Navigation Mode",
+    [
+        "Scan Top 10 Heavy Volume Movers",
+        "Scan $5–$100 Momentum Stocks (US & CA)",
+        "Manual Ticker Entry"
+    ]
 )
 
-def fetch_put_call_ratio(ticker_symbol):
-    """Fetches option chain and calculates Volume Put/Call Ratio (PCR)."""
+trading_style = st.sidebar.selectbox(
+    "Trading Strategy & Timeframe",
+    [
+        "Scalping (1m - Rapid Execution)",
+        "Day Trading (5m Intraday)",
+        "Swing Trading (15m/1h Trend)",
+        "Long Term (1D Regime/Macro)"
+    ]
+)
+
+risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
+
+# ==========================================
+# TRADINGVIEW DATA ENGINE
+# ==========================================
+def fetch_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
+    """Fetches real-time TradingView technical analysis, oscillators, and moving averages."""
     try:
-        ticker_obj = yf.Ticker(ticker_symbol)
-        options_expirations = ticker_obj.options
-        if not options_expirations:
-            return None, "No Options Data"
+        clean_sym = symbol.replace(".TO", "")
+        exch = "TSX" if ".TO" in symbol else "NASDAQ"
+        scr = "canada" if ".TO" in symbol else "america"
 
-        nearest_exp = options_expirations[0]
-        opt_chain = ticker_obj.option_chain(nearest_exp)
-        calls = opt_chain.calls
-        puts = opt_chain.puts
-
-        total_call_vol = calls["volume"].fillna(0).sum()
-        total_put_vol = puts["volume"].fillna(0).sum()
-        pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 1.0
-
-        if pcr > 1.2:
-            sentiment = f"Heavy Bearish Puts ({pcr:.2f})"
-        elif pcr < 0.6:
-            sentiment = f"Heavy Bullish Calls ({pcr:.2f})"
-        else:
-            sentiment = f"Neutral ({pcr:.2f})"
-
-        return round(pcr, 2), sentiment
+        handler = TA_Handler(
+            symbol=clean_sym,
+            screener=scr,
+            exchange=exch,
+            interval=interval
+        )
+        return handler.get_analysis()
     except Exception:
-        return None, "Options Unavailable"
+        # Fallback to NYSE if NASDAQ fails for US stocks
+        if ".TO" not in symbol:
+            try:
+                handler = TA_Handler(
+                    symbol=symbol,
+                    screener="america",
+                    exchange="NYSE",
+                    interval=interval
+                )
+                return handler.get_analysis()
+            except Exception:
+                return None
+        return None
 
+def render_tradingview_widget(symbol="AMD", interval_code="1"):
+    """Embeds TradingView's interactive widget directly in the app."""
+    clean_sym = symbol.replace(".TO", "")
+    tv_symbol = f"TSX:{clean_sym}" if ".TO" in symbol else f"NASDAQ:{clean_sym}"
 
-def fetch_cash_flow_sentiment(ticker_symbol):
-    """Fetches Operating Cash Flow and Free Cash Flow to determine Cash Flow Sentiment."""
-    try:
-        ticker_obj = yf.Ticker(ticker_symbol)
-        cf = ticker_obj.cashflow
-        info = ticker_obj.info
+    tradingview_html = f"""
+    <div class="tradingview-widget-container" style="height:550px;width:100%">
+      <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+        "autosize": true,
+        "symbol": "{tv_symbol}",
+        "interval": "{interval_code}",
+        "timezone": "America/New_York",
+        "theme": "light",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_chart"
+      }});
+      </script>
+    </div>
+    """
+    components.html(tradingview_html, height=560)
 
-        if cf is None or cf.empty:
-            return None, "N/A (ETFs/Indices)"
+# ==========================================
+# ADVANCED QUANT & PINE SCRIPT SYNTHESIS
+# ==========================================
+def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
+    interval_map = {
+        "Scalping (1m - Rapid Execution)": (Interval.INTERVAL_1_MINUTE, "1"),
+        "Day Trading (5m Intraday)": (Interval.INTERVAL_5_MINUTES, "5"),
+        "Swing Trading (15m/1h Trend)": (Interval.INTERVAL_15_MINUTES, "15"),
+        "Long Term (1D Regime/Macro)": (Interval.INTERVAL_1_DAY, "D")
+    }
 
-        operating_cf = None
-        free_cf = None
+    tv_interval, tv_code = interval_map[style_name]
+    analysis = fetch_tv_analysis(ticker_symbol, interval=tv_interval)
 
-        if "Operating Cash Flow" in cf.index:
-            operating_cf = cf.loc["Operating Cash Flow"].iloc[0]
-        elif "Total Cash From Operating Activities" in cf.index:
-            operating_cf = cf.loc["Total Cash From Operating Activities"].iloc[0]
+    if not analysis:
+        return None, tv_code
 
-        if "Free Cash Flow" in cf.index:
-            free_cf = cf.loc["Free Cash Flow"].iloc[0]
+    inds = analysis.indicators
+    summary = analysis.summary
 
-        mcap = info.get("marketCap", None)
+    price = float(inds.get("close", 0.0))
+    open_price = float(inds.get("open", price))
+    high_price = float(inds.get("high", price))
+    low_price = float(inds.get("low", price))
 
-        if free_cf and mcap and mcap > 0:
-            fcf_yield = (free_cf / mcap) * 100.0
-            if fcf_yield > 4.0:
-                sentiment = f"Strong Cash Generation (Yield: {fcf_yield:.1f}%)"
-            elif fcf_yield > 0:
-                sentiment = f"Positive Cash Flow (Yield: {fcf_yield:.1f}%)"
-            else:
-                sentiment = f"Cash Burn / Negative Yield ({fcf_yield:.1f}%)"
-            return round(fcf_yield, 2), sentiment
-        elif operating_cf and operating_cf > 0:
-            return 1.0, "Positive Operating Cash Flow"
-        elif operating_cf and operating_cf < 0:
-            return -1.0, "Negative Operating Cash Flow"
-        else:
-            return None, "Neutral Cash Flow"
-    except Exception:
-        return None, "Cash Flow Unavailable"
+    rsi = float(inds.get("RSI", 50.0))
+    macd_val = float(inds.get("MACD.macd", 0.0))
+    macd_signal = float(inds.get("MACD.signal", 0.0))
+    sma20 = float(inds.get("SMA20", price))
+    ema20 = float(inds.get("EMA20", price))
+    bb_upper = float(inds.get("BB.upper", price * 1.02))
+    bb_lower = float(inds.get("BB.lower", price * 0.98))
+    ichimoku_base = float(inds.get("Ichimoku.BLine", price))
 
+    tv_rec = summary.get("RECOMMENDATION", "NEUTRAL")
+    signal_direction = "BUY" if "BUY" in tv_rec else ("SELL" if "SELL" in tv_rec else "NEUTRAL")
 
-@st.cache_data(ttl=300)
-def scan_top10_heavy_movers(ticker_list, min_price=0.0, max_price=10000.0):
-    """Scans watchlist and ranks stocks based on RVOL, % Change, Share Float, and ATR(14)."""
-    movers = []
+    # Quant Pine Script Approximations via TV Multi-Filters
+    # 1. Smart Money Concepts (Liquidity Sweep / Order Block Filter)
+    smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= smc_block_check(price, low_price) else "Order Block Resistance (Bearish)"
+    
+    # 2. Lorentzian Classification (Distance Feature Vector Proxy)
+    lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in tv_rec) else "Bearish Feature Cluster"
+
+    # 3. Hull Suite (Trend Continuation)
+    hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
+
+    # Stop & Target Calculation
+    stop_distance = price * (risk_tolerance / 100.0)
+
+    if signal_direction == "BUY":
+        entry_price = price
+        stop_loss = entry_price - stop_distance
+        target_1 = entry_price + (stop_distance * 1.5)
+        target_2 = entry_price + (stop_distance * 3.0)
+        # Check if targets already hit in current session high
+        targets_reached = high_price >= target_2
+    else:
+        entry_price = price
+        stop_loss = entry_price + stop_distance
+        target_1 = entry_price - (stop_distance * 1.5)
+        target_2 = entry_price - (stop_distance * 3.0)
+        # Check if sell targets already hit in current session low
+        targets_reached = low_price <= target_2
+
+    quant_data = {
+        "Ticker": ticker_symbol,
+        "Signal": signal_direction,
+        "Price": price,
+        "Entry": entry_price,
+        "Stop Loss": stop_loss,
+        "Target 1": target_1,
+        "Target 2": target_2,
+        "Targets Reached": targets_reached,
+        "RSI": rsi,
+        "MACD State": "Bullish Crossover" if macd_val > macd_signal else "Bearish Pressure",
+        "Supertrend / BB": "Upper Band Breakout" if price > bb_upper else ("Lower Band Oversold" if price < bb_lower else "Consolidation"),
+        "Ichimoku Kijun": "Above Base Line" if price > ichimoku_base else "Below Base Line",
+        "SMC Structure": smc_filter,
+        "Lorentzian Class": lorentzian_signal,
+        "Hull Suite": hull_trend
+    }
+
+    return quant_data, tv_code
+
+def smc_block_check(price, low_price):
+    return low_price * 1.002
+
+# ==========================================
+# SCREENER ENGINE
+# ==========================================
+@st.cache_data(ttl=180)
+def scan_tickers(ticker_list, min_price=0.0, max_price=10000.0):
+    results = []
     for sym in ticker_list:
         try:
-            ticker_obj = yf.Ticker(sym)
-            df = ticker_obj.history(period="30d", interval="1d")
+            analysis = fetch_tv_analysis(sym, interval=Interval.INTERVAL_1_DAY)
+            if not analysis:
+                continue
+            inds = analysis.indicators
+            price = float(inds.get("close", 0.0))
+            if price < min_price or price > max_price:
+                continue
             
-            if not df.empty and len(df) >= 15:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
+            change = float(inds.get("change", 0.0))
+            volume = int(inds.get("volume", 0))
+            atr = float(inds.get("Volatility.D", price * 0.02))
 
-                latest = df.iloc[-1]
-                prev = df.iloc[-2]
-
-                price = float(latest["Close"])
-                
-                # Apply Strict Price Filter
-                if price < min_price or price > max_price:
-                    continue
-
-                pct_change = ((price - float(prev["Close"])) / float(prev["Close"])) * 100.0
-                curr_volume = int(latest["Volume"])
-
-                avg_vol_10d = df["Volume"].tail(10).mean()
-                rvol = float(curr_volume) / avg_vol_10d if avg_vol_10d > 0 else 1.0
-
-                high_low = df["High"] - df["Low"]
-                high_prev_close = (df["High"] - df["Close"].shift(1)).abs()
-                low_prev_close = (df["Low"] - df["Close"].shift(1)).abs()
-                tr = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
-                atr_14 = float(tr.rolling(14).mean().iloc[-1])
-                atr_pct = (atr_14 / price) * 100.0
-
-                info = ticker_obj.info
-                float_shares = info.get("floatShares", None)
-                if float_shares and float_shares > 0:
-                    float_fmt = f"{float_shares / 1e6:.1f}M"
-                    float_mult = 1.5 if float_shares < 100e6 else 1.0
-                else:
-                    float_fmt = "N/A"
-                    float_mult = 1.0
-
-                impact_score = abs(pct_change) * rvol * atr_pct * float_mult
-
-                movers.append({
-                    "Ticker": sym,
-                    "Price": price,
-                    "Change %": pct_change,
-                    "Current Volume": curr_volume,
-                    "RVOL": rvol,
-                    "ATR (14)": atr_14,
-                    "ATR %": atr_pct,
-                    "Share Float": float_fmt,
-                    "Score": impact_score
-                })
+            results.append({
+                "Ticker": sym,
+                "Price": price,
+                "Change %": change,
+                "Volume": volume,
+                "ATR": atr,
+                "Score": abs(change) * (volume / 1e6)
+            })
         except Exception:
             continue
 
-    df_movers = pd.DataFrame(movers)
-    if not df_movers.empty:
-        df_movers = df_movers.sort_values(by="Score", ascending=False).head(10).reset_index(drop=True)
-    return df_movers
+    df = pd.DataFrame(results)
+    if not df.empty:
+        df = df.sort_values(by="Score", ascending=False).head(10).reset_index(drop=True)
+    return df
 
-
-def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_sentiment, cf_yield, cf_sentiment):
-    """Evaluates quantitative signal setup across technicals, options PCR, and cash flow sentiment."""
-    style_configs = {
-        "Scalping (15m ORB + 1m)": {"period": "1d", "interval": "1m", "fast": "EMA9", "slow": "EMA21", "r1": 1.0, "r2": 2.0},
-        "Day Trade (Intraday)": {"period": "5d", "interval": "5m", "fast": "SMA5", "slow": "SMA20", "r1": 1.5, "r2": 3.0},
-        "Swing Trade": {"period": "10d", "interval": "15m", "fast": "SMA5", "slow": "SMA20", "r1": 1.5, "r2": 3.0},
-        "Short-Term (1-4 Weeks)": {"period": "60d", "interval": "1d", "fast": "SMA5", "slow": "SMA20", "r1": 2.0, "r2": 4.0},
-        "Long-Term (Months/Years)": {"period": "2y", "interval": "1d", "fast": "SMA50", "slow": "SMA200", "r1": 2.5, "r2": 5.0}
-    }
-    
-    cfg = style_configs[style_name]
-    data = yf.download(ticker_symbol, period=cfg["period"], interval=cfg["interval"], progress=False)
-    
-    if data.empty and "." in ticker_symbol:
-        fallback_sym = ticker_symbol.split(".")[0]
-        data = yf.download(fallback_sym, period=cfg["period"], interval=cfg["interval"], progress=False)
-
-    if data.empty:
-        return None, None, None
-
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    # FORCE TIMEZONE TO US/EASTERN IMMEDIATELY TO ENSURE TODAY'S DATE IS ACCURATE
-    try:
-        if data.index.tz is None:
-            data.index = data.index.tz_localize("UTC").tz_convert("America/New_York")
-        else:
-            data.index = data.index.tz_convert("America/New_York")
-    except Exception:
-        pass
-
-    data["SMA5"] = data["Close"].rolling(5).mean()
-    data["SMA20"] = data["Close"].rolling(20).mean()
-    data["SMA50"] = data["Close"].rolling(50).mean()
-    data["SMA200"] = data["Close"].rolling(200).mean()
-    data["EMA9"] = data["Close"].ewm(span=9, adjust=False).mean()
-    data["EMA21"] = data["Close"].ewm(span=21, adjust=False).mean()
-
-    typical_price = (data["High"] + data["Low"] + data["Close"]) / 3
-    data["VWAP"] = (typical_price * data["Volume"]).cumsum() / data["Volume"].cumsum()
-
-    high_low = data["High"] - data["Low"]
-    high_prev_close = (data["High"] - data["Close"].shift(1)).abs()
-    low_prev_close = (data["Low"] - data["Close"].shift(1)).abs()
-    tr = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
-    data["ATR"] = tr.rolling(14).mean()
-
-    delta = data["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    data["RSI"] = 100 - (100 / (1 + rs))
-
-    fast_ma, slow_ma = cfg["fast"], cfg["slow"]
-    if style_name == "Long-Term (Months/Years)" and data["SMA200"].dropna().empty:
-        fast_ma, slow_ma = "SMA20", "SMA50"
-
-    clean_data = data.dropna(subset=[fast_ma, slow_ma, "RSI"]).copy()
-    if clean_data.empty or len(clean_data) < 2:
-        return None, None, None
-
-    latest_bar = clean_data.iloc[-1]
-    prev_bar = clean_data.iloc[-2]
-    current_price = float(latest_bar["Close"])
-    current_atr = float(latest_bar["ATR"]) if not pd.isna(latest_bar["ATR"]) else current_price * 0.005
-
-    bullish_score, bearish_score = 0, 0
-    reasons = []
-
-    # GUARANTEED TODAY'S 15-MINUTE OPENING RANGE (ORB) CALCULATION (09:30 AM - 09:45 AM EST)
-    orb_high, orb_low = None, None
-    if "Scalping" in style_name and not clean_data.empty:
-        try:
-            # 1. Identify today's exact date from the latest candle
-            latest_trading_day = clean_data.index.max().date()
-            today_bars = clean_data[clean_data.index.date == latest_trading_day]
-
-            # 2. Extract strictly candles between 09:30 AM and 09:45 AM EST today
-            orb_window = today_bars.between_time("09:30", "09:45")
-
-            if not orb_window.empty:
-                orb_high = float(orb_window["High"].max())
-                orb_low = float(orb_window["Low"].min())
-            elif not today_bars.empty:
-                # Fallback: First 15 candles of today's market session
-                first_15 = today_bars.head(15)
-                orb_high = float(first_15["High"].max())
-                orb_low = float(first_15["Low"].min())
-        except Exception:
-            orb_high, orb_low = None, None
-
-        if orb_high and orb_low:
-            if current_price > orb_high:
-                bullish_score += 2
-                reasons.append(f"ORB Breakout (${orb_high:.2f})")
-            elif current_price < orb_low:
-                bearish_score += 2
-                reasons.append(f"ORB Breakdown (${orb_low:.2f})")
-
-    if pcr_val is not None:
-        if pcr_val < 0.6:
-            bullish_score += 1
-            reasons.append("Call Heavy Sentiment")
-        elif pcr_val > 1.2:
-            bearish_score += 1
-            reasons.append("Put Heavy Sentiment")
-
-    if cf_yield is not None:
-        if cf_yield > 0:
-            bullish_score += 1
-            reasons.append("Positive Cash Flow")
-        elif cf_yield < 0:
-            bearish_score += 1
-            reasons.append("Negative Cash Flow")
-
-    if float(prev_bar[fast_ma]) <= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
-        bullish_score += 2
-        reasons.append(f"Cross: {fast_ma} > {slow_ma}")
-    elif float(prev_bar[fast_ma]) >= float(prev_bar[slow_ma]) and float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
-        bearish_score += 2
-        reasons.append(f"Cross: {fast_ma} < {slow_ma}")
-
-    if float(latest_bar[fast_ma]) > float(latest_bar[slow_ma]):
-        bullish_score += 1
-    elif float(latest_bar[fast_ma]) < float(latest_bar[slow_ma]):
-        bearish_score += 1
-
-    rsi_val = float(latest_bar["RSI"])
-    if rsi_val < 35:
-        bullish_score += 1
-        reasons.append(f"Oversold RSI ({rsi_val:.1f})")
-    elif rsi_val > 65:
-        bearish_score += 1
-        reasons.append(f"Overbought RSI ({rsi_val:.1f})")
-
-    signal = "BUY" if bullish_score >= bearish_score else "SELL"
-
-    if "Scalping" in style_name:
-        stop_dist = max(current_atr * 1.2, current_price * 0.003)
-    else:
-        stop_dist = current_price * (risk_percent / 100.0)
-
-    if signal == "BUY":
-        entry_p = current_price
-        sl_p = entry_p - stop_dist
-        t1_p = entry_p + (stop_dist * cfg["r1"])
-        t2_p = entry_p + (stop_dist * cfg["r2"])
-    else:
-        entry_p = current_price
-        sl_p = entry_p + stop_dist
-        t1_p = entry_p - (stop_dist * cfg["r1"])
-        t2_p = entry_p - (stop_dist * cfg["r2"])
-
-    setup_dict = {
-        "Style": style_name,
-        "Signal": signal,
-        "Entry": f"${entry_p:.2f}",
-        "Stop Loss": f"${sl_p:.2f}",
-        "Target 1": f"${t1_p:.2f}",
-        "Target 2": f"${t2_p:.2f}",
-        "Options PCR": pcr_sentiment,
-        "Cash Flow Sentiment": cf_sentiment,
-        "RSI": f"{rsi_val:.1f}",
-        "Rationale": ", ".join(reasons) if reasons else "Trend Alignment"
-    }
-
-    return setup_dict, clean_data, (orb_high, orb_low)
-
-
-@st.cache_data(ttl=300)
-def find_top_market_opportunity(top_tickers):
-    """Scans all Top 10 stocks in the background and finds the SINGLE highest conviction setup."""
-    best_candidate = None
-    highest_consensus = 0
-    best_direction = "BUY"
-
-    for sym in top_tickers:
-        buy_c, sell_c = 0, 0
-        styles_list = ["Scalping (15m ORB + 1m)", "Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
-        
-        for style in styles_list:
-            setup, _, _ = evaluate_style_signal(sym, style, 1.5, None, "N/A", None, "N/A")
-            if setup:
-                if setup["Signal"] == "BUY":
-                    buy_c += 1
-                else:
-                    sell_c += 1
-
-        if buy_c >= 4 and buy_c > highest_consensus:
-            highest_consensus = buy_c
-            best_candidate = sym
-            best_direction = "BUY"
-        elif sell_c >= 4 and sell_c > highest_consensus:
-            highest_consensus = sell_c
-            best_candidate = sym
-            best_direction = "SELL"
-
-    return best_candidate, best_direction, highest_consensus
-
-
-# BACKGROUND REFRESH FRAGMENT FOR HEAVY MOVERS
-@st.fragment(run_every="60s")
-def render_top10_screener():
-    st.subheader("🔥 Top 10 Heavy Volume & Momentum Movers Screener")
-    st.caption("Auto-refreshes in background every 60s | Evaluates RVOL, % Change, Volume, Float & ATR(14).")
-
-    movers_df = scan_top10_heavy_movers(US_HEAVY_WATCHLIST)
-
-    if not movers_df.empty:
-        display_df = movers_df.copy()
-        display_df["Rank"] = range(1, len(display_df) + 1)
-        display_df["Price"] = display_df["Price"].map(lambda x: f"${x:.2f}")
-        display_df["Change %"] = display_df["Change %"].map(lambda x: f"{x:+.2f}%")
-        display_df["Current Volume"] = display_df["Current Volume"].map(lambda x: f"{x:,}")
-        display_df["RVOL"] = display_df["RVOL"].map(lambda x: f"{x:.2f}x")
-        display_df["ATR (14)"] = display_df["ATR (14)"].map(lambda x: f"${x:.2f}")
-        display_df["ATR %"] = display_df["ATR %"].map(lambda x: f"{x:.2f}%")
-
-        display_df = display_df[["Rank", "Ticker", "Price", "Change %", "Current Volume", "RVOL", "ATR (14)", "ATR %", "Share Float"]]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        return movers_df["Ticker"].tolist()
-    else:
-        st.warning("Could not fetch heavy movers data.")
-        return ["NVDA"]
-
-
-# BACKGROUND REFRESH FRAGMENT FOR PENNY / MID-CAP ($5-$100) STOCKS
-@st.fragment(run_every="60s")
-def render_penny_screener(market_choice):
-    st.subheader(f"💎 Top Momentum Stocks ($5 - $100 Range) — Market: {market_choice}")
-    st.caption("Filters high volume growth candidates strictly priced between $5 and $100.")
-
-    target_list = US_PENNY_WATCHLIST if market_choice == "US Market (NYSE/NASDAQ)" else CA_PENNY_WATCHLIST
-    movers_df = scan_top10_heavy_movers(target_list, min_price=5.0, max_price=100.0)
-
-    if not movers_df.empty:
-        display_df = movers_df.copy()
-        display_df["Rank"] = range(1, len(display_df) + 1)
-        display_df["Price"] = display_df["Price"].map(lambda x: f"${x:.2f}")
-        display_df["Change %"] = display_df["Change %"].map(lambda x: f"{x:+.2f}%")
-        display_df["Current Volume"] = display_df["Current Volume"].map(lambda x: f"{x:,}")
-        display_df["RVOL"] = display_df["RVOL"].map(lambda x: f"{x:.2f}x")
-        display_df["ATR (14)"] = display_df["ATR (14)"].map(lambda x: f"${x:.2f}")
-        display_df["ATR %"] = display_df["ATR %"].map(lambda x: f"{x:.2f}%")
-
-        display_df = display_df[["Rank", "Ticker", "Price", "Change %", "Current Volume", "RVOL", "ATR (14)", "ATR %", "Share Float"]]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        return movers_df["Ticker"].tolist()
-    else:
-        st.warning(f"No qualifying stocks currently found between $5 and $100 for {market_choice}.")
-        return [target_list[0]]
-
-
-# NAVIGATION MODE ROUTING
+# ==========================================
+# MAIN DASHBOARD ROUTING
+# ==========================================
 if navigation_mode == "Scan Top 10 Heavy Volume Movers":
-    st.title("🔥 Real-Time Market Screener Mode")
-    ticker_options = render_top10_screener()
+    st.title("🔥 Top 10 Heavy Volume Movers (TradingView Scanner)")
+    movers_df = scan_tickers(US_HEAVY_WATCHLIST)
     
-    opp_ticker, opp_dir, opp_score = find_top_market_opportunity(ticker_options)
-    if opp_ticker and opp_ticker != st.session_state.get("selected_stock", ticker_options[0]):
-        if opp_dir == "BUY":
-            st.success(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Screener) triggered a **{opp_score}/5 CONVICTION BUY SETUP**!")
-        else:
-            st.error(f"💡 **SINGLE MARKET ALERT:** Stock **{opp_ticker}** (from Screener) triggered a **{opp_score}/5 CONVICTION SELL SETUP**!")
+    if not movers_df.empty:
+        disp = movers_df.copy()
+        disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
+        disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
+        disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
+        disp["ATR"] = disp["ATR"].map(lambda x: f"${x:.2f}")
+        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume", "ATR"]], use_container_width=True, hide_index=True)
+        selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
+    else:
+        selected_ticker = "NVDA"
 
-    selected_ticker = st.selectbox("Select a Heavy Mover for Multi-Style Analysis:", ticker_options, index=0)
-    st.session_state["selected_stock"] = selected_ticker
-
-elif navigation_mode == "Scan $5-$100 Momentum Stocks (US & CA)":
-    st.title("💎 $5–$100 High-Momentum Stock Screener")
-    market_choice = st.radio("Select Target Market", ["US Market (NYSE/NASDAQ)", "Canadian Market (TSX/TSXV)"], horizontal=True)
+elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
+    st.title("💎 $5–$100 High Momentum Screener (US & CA)")
+    market_choice = st.radio("Target Market", ["US Market (NYSE/NASDAQ)", "Canadian Market (TSX/TSXV)"], horizontal=True)
     
-    ticker_options = render_penny_screener(market_choice)
-    selected_ticker = st.selectbox("Select a $5-$100 Stock for Multi-Style Analysis:", ticker_options, index=0)
+    watchlist = US_MOMENTUM_WATCHLIST if "US" in market_choice else CA_MOMENTUM_WATCHLIST
+    movers_df = scan_tickers(watchlist, min_price=5.0, max_price=100.0)
+
+    if not movers_df.empty:
+        disp = movers_df.copy()
+        disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
+        disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
+        disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
+        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume"]], use_container_width=True, hide_index=True)
+        selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
+    else:
+        selected_ticker = "SOUN"
 
 else:
-    st.title("⚡ Manual Stock Signal & Chart Analyzer")
-    selected_ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, PANW, SU.TO):", "SOUN")
+    st.title("⚡ Manual Ticker Quant Analyzer")
+    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. AMD, TSLA, SU.TO):", "AMD").strip().upper()
 
-# Sidebar Controls
-focus_style = st.sidebar.selectbox(
-    "Select Primary Focus Style for Charting:",
-    ["Scalping (15m ORB + 1m)", "Day Trade (Intraday)", "Swing Trade", "Short-Term (1-4 Weeks)", "Long-Term (Months/Years)"]
-)
-risk_pct = st.sidebar.slider("Stop Loss Risk %", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
-
-
-# MULTI-STYLE ANALYSIS ENGINE
+# ==========================================
+# QUANT ANALYSIS DISPLAY ENGINE
+# ==========================================
 if selected_ticker:
-    clean_sym = selected_ticker.strip().upper()
-    
-    pcr_val, pcr_sentiment = fetch_put_call_ratio(clean_sym)
-    cf_yield, cf_sentiment = fetch_cash_flow_sentiment(clean_sym)
+    quant_setup, tv_code = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
 
-    styles_list = [
-        "Scalping (15m ORB + 1m)",
-        "Day Trade (Intraday)",
-        "Swing Trade",
-        "Short-Term (1-4 Weeks)",
-        "Long-Term (Months/Years)"
-    ]
+    if quant_setup:
+        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker}")
 
-    all_signals = []
-    focused_data = None
-    focused_orb = (None, None)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Current Price", f"${quant_setup['Price']:.2f}")
+        col2.metric("RSI (14)", f"{quant_setup['RSI']:.1f}")
+        col3.metric("TradingView Regime", quant_setup['Signal'])
+        col4.metric("Risk Percent", f"{risk_pct}%")
 
-    for style in styles_list:
-        setup, c_data, orb_range = evaluate_style_signal(clean_sym, style, risk_pct, pcr_val, pcr_sentiment, cf_yield, cf_sentiment)
-        if setup:
-            all_signals.append(setup)
-        if style == focus_style:
-            focused_data = c_data
-            focused_orb = orb_range
+        # Pine Script Analyzers Breakdown Table
+        script_df = pd.DataFrame([{
+            "Lorentzian Classification": quant_setup["Lorentzian Class"],
+            "Smart Money Concepts (SMC)": quant_setup["SMC Structure"],
+            "Hull Suite Trend": quant_setup["Hull Suite"],
+            "MACD State": quant_setup["MACD State"],
+            "Supertrend / Bollinger": quant_setup["Supertrend / BB"],
+            "Ichimoku Kijun Alignment": quant_setup["Ichimoku Kijun"]
+        }])
+        st.dataframe(script_df, use_container_width=True, hide_index=True)
 
-    st.subheader(f"📊 All Trading Style Signals Matrix: {clean_sym}")
-    
-    col_a, col_b = st.columns(2)
-    col_a.info(f"**Options Positioning (PCR):** {pcr_sentiment}")
-    col_b.info(f"**Cash Flow Sentiment:** {cf_sentiment}")
+        # CONDITIONAL TRADE EXECUTION DISPLAY
+        st.subheader("🎯 Optimal Trade Setup Execution")
 
-    if all_signals:
-        signals_df = pd.DataFrame(all_signals)
-        st.dataframe(signals_df[["Style", "Signal", "Entry", "Stop Loss", "Target 1", "Target 2", "Options PCR", "Cash Flow Sentiment", "RSI", "Rationale"]], use_container_width=True, hide_index=True)
-
-    # Render Chart for Selected Focused Style
-    if focused_data is not None and not focused_data.empty:
-        st.subheader(f"📈 Focused Chart View: {clean_sym} ({focus_style})")
-
-        display_chart_data = focused_data.tail(60)
-
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=display_chart_data.index,
-            open=display_chart_data["Open"],
-            high=display_chart_data["High"],
-            low=display_chart_data["Low"],
-            close=display_chart_data["Close"],
-            name="Price Candles"
-        ))
-
-        if "EMA9" in display_chart_data.columns and "Scalping" in focus_style:
-            fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA9"], line=dict(color="blue", width=1.5), name="9-EMA"))
-            fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["EMA21"], line=dict(color="orange", width=1.5), name="21-EMA"))
-            fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["VWAP"], line=dict(color="purple", width=1.5, dash="dot"), name="VWAP"))
+        if quant_setup["Targets Reached"]:
+            st.info(f"🚫 **Trade Setup Suppressed for {selected_ticker}:** The primary intraday profit targets (Target 1 / Target 2) have already been reached during this session. No new execution parameters generated.")
         else:
-            fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["SMA5"], line=dict(color="blue", width=1.5), name="5-SMA"))
-            fig.add_trace(go.Scatter(x=display_chart_data.index, y=display_chart_data["SMA20"], line=dict(color="orange", width=1.5), name="20-SMA"))
+            trade_cols = st.columns(5)
+            trade_cols[0].metric("Suggested Action", quant_setup["Signal"])
+            trade_cols[1].metric("Ideal Entry", f"${quant_setup['Entry']:.2f}")
+            trade_cols[2].metric("Stop Loss", f"${quant_setup['Stop Loss']:.2f}")
+            trade_cols[3].metric("Target 1 (1.5x Risk)", f"${quant_setup['Target 1']:.2f}")
+            trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
-        if focus_style == "Scalping (15m ORB + 1m)" and focused_orb[0] and focused_orb[1]:
-            fig.add_hline(y=focused_orb[0], line_dash="solid", line_color="orange", annotation_text=f"15m ORB High (${focused_orb[0]:.2f})", annotation_position="top left")
-            fig.add_hline(y=focused_orb[1], line_dash="solid", line_color="orange", annotation_text=f"15m ORB Low (${focused_orb[1]:.2f})", annotation_position="bottom left")
-
-        fig.update_layout(
-            title=f"Candlestick Chart ({focus_style}) for {clean_sym}",
-            xaxis_rangeslider_visible=False,
-            template="plotly_white",
-            height=550
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # LIVE TRADINGVIEW EMBEDDED CHART
+        st.subheader(f"📈 Real-Time TradingView Interactive Chart: {selected_ticker}")
+        render_tradingview_widget(selected_ticker, interval_code=tv_code)
+    else:
+        st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Check ticker spelling or exchange listing.")
