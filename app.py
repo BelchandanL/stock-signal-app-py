@@ -216,17 +216,33 @@ def evaluate_style_signal(ticker_symbol, style_name, risk_percent, pcr_val, pcr_
     bullish_score, bearish_score = 0, 0
     reasons = []
 
+    # ACCURATE REGULAR TRADING HOURS 15m OPENING RANGE (ORB) CALCULATION
     orb_high, orb_low = None, None
-    if "Scalping" in style_name and len(clean_data) >= 15:
-        first_15m = clean_data.head(15)
-        orb_high = float(first_15m["High"].max())
-        orb_low = float(first_15m["Low"].min())
-        if current_price > orb_high:
-            bullish_score += 2
-            reasons.append(f"ORB Breakout (${orb_high:.2f})")
-        elif current_price < orb_low:
-            bearish_score += 2
-            reasons.append(f"ORB Breakdown (${orb_low:.2f})")
+    if "Scalping" in style_name and not clean_data.empty:
+        latest_date = clean_data.index[-1].date()
+        today_data = clean_data[clean_data.index.date == latest_date]
+
+        # Filter strictly for 9:30 AM - 9:45 AM Regular Market Open
+        try:
+            rth_opening = today_data.between_time("09:30", "09:45")
+        except Exception:
+            rth_opening = pd.DataFrame()
+
+        if not rth_opening.empty:
+            orb_high = float(rth_opening["High"].max())
+            orb_low = float(rth_opening["Low"].min())
+        elif not today_data.empty:
+            first_15m = today_data.head(15)
+            orb_high = float(first_15m["High"].max())
+            orb_low = float(first_15m["Low"].min())
+
+        if orb_high and orb_low:
+            if current_price > orb_high:
+                bullish_score += 2
+                reasons.append(f"ORB Breakout (${orb_high:.2f})")
+            elif current_price < orb_low:
+                bearish_score += 2
+                reasons.append(f"ORB Breakdown (${orb_low:.2f})")
 
     if pcr_val is not None:
         if pcr_val < 0.6:
