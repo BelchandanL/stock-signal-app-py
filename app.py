@@ -38,7 +38,7 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
     """
     Queries TradingView's backend scanner dynamically across US/CA markets.
-    Extracts clean ticker, verified exchange, volume, and price data.
+    Guarantees clean ticker symbol extraction without embedded 'EXCHANGE:' prefixes.
     """
     try:
         q = (
@@ -58,15 +58,20 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             df = data[1]
             results = []
             for _, row in df.iterrows():
-                ticker_full = str(row.get('ticker', row.get('name', '')))
+                ticker_full = str(row.get('ticker', row.get('name', ''))).strip()
+                
+                # Strip out embedded exchange prefix if returned by screener
                 if ":" in ticker_full:
                     exchange, sym = ticker_full.split(":", 1)
                 else:
                     exchange, sym = ("NASDAQ" if market == "america" else "TSX"), ticker_full
 
+                clean_sym = sym.replace(".TO", "").replace(".V", "").strip().upper()
+                clean_exch = exchange.strip().upper()
+
                 results.append({
-                    "Ticker": sym.upper().strip(),
-                    "Exchange": exchange.upper().strip(),
+                    "Ticker": clean_sym,
+                    "Exchange": clean_exch,
                     "Price": float(row.get('close', 0.0)),
                     "Change %": float(row.get('change', 0.0)),
                     "Volume": int(row.get('volume', 0)),
@@ -80,16 +85,17 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
     """
-    Bulletproof Multi-Exchange Resolver.
+    Comprehensive Multi-Exchange Resolver.
     Sweeps NASDAQ, NYSE, AMEX, OTC, TSX, and TSXV until valid indicator data is found.
     """
+    # Thoroughly clean symbol input from any passed prefixes or extensions
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     is_ca = ".TO" in symbol or symbol.endswith(".V") or symbol in ["BTE", "LUN", "ATH", "CVE", "ARX", "DML", "FM", "SU", "WCP"]
     
     if is_ca:
         exchanges_to_try = [("canada", "TSX"), ("canada", "TSXV")]
     else:
-        # Include OTC Markets for sub-penny/microcap stocks like INND
+        # Sweeps all US exchange tiers including OTC Markets for penny/microcaps
         exchanges_to_try = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX"), ("america", "OTC")]
 
     for screener, exch in exchanges_to_try:
@@ -135,11 +141,11 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
 def render_tradingview_widget(symbol="INND", exchange="OTC", interval_code="1"):
     """
     Renders TradingView's official interactive chart widget.
-    Guarantees correct prefix mapping for OTC, NASDAQ, NYSE, AMEX, TSX, and TSXV.
+    Guarantees clean prefix formatting without duplicate exchange namespaces.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     
-    # Auto-map known OTC tickers if exchange was misidentified
+    # Auto-map known OTC microcaps if exchange was misclassified
     if clean_sym in ["INND", "PHIL", "EEENF", "AABB", "TSNP", "SANW"]:
         exchange = "OTC"
 
@@ -301,7 +307,9 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. INND, LABT, PANW, NVDA, AMD, TSLA, SU):", "INND").strip().upper()
+    # Clean manual ticker input directly upon entry
+    raw_input = st.text_input("Enter Ticker Symbol (e.g. INND, LABT, PANW, NVDA, AMD, TSLA, SU):", "INND").strip().upper()
+    selected_ticker = raw_input.split(":")[-1].replace(".TO", "").replace(".V", "").strip()
     selected_exchange = None
 
 # ==========================================
