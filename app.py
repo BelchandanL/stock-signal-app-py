@@ -6,6 +6,26 @@ from tradingview_ta import TA_Handler, Interval
 st.set_page_config(page_title="Quant TradingView Market Dashboard", layout="wide")
 
 # ==========================================
+# STATIC EXCHANGE RESOLUTION MAP
+# ==========================================
+KNOWN_EXCHANGES = {
+    # NASDAQ
+    "INTC": "NASDAQ", "NVDA": "NASDAQ", "AMD": "NASDAQ", "AAPL": "NASDAQ",
+    "AMZN": "NASDAQ", "META": "NASDAQ", "MSFT": "NASDAQ", "GOOGL": "NASDAQ",
+    "TSLA": "NASDAQ", "NFLX": "NASDAQ", "QQQ": "NASDAQ", "COIN": "NASDAQ",
+    "MARA": "NASDAQ", "SOUN": "NASDAQ", "PLUG": "NASDAQ", "LCID": "NASDAQ",
+    "LABT": "NASDAQ", "SOFI": "NASDAQ", "RBLX": "NASDAQ", "ARM": "NASDAQ",
+    # NYSE
+    "PLTR": "NYSE", "SPY": "AMEX", "BA": "NYSE", "BABA": "NYSE",
+    "PANW": "NYSE", "BBAI": "NYSE", "RIG": "NYSE", "NIO": "NYSE",
+    # TSX / TSXV (Canadian)
+    "BTE": "TSX", "LUN": "TSX", "ATH": "TSX", "CVE": "TSX",
+    "ARX": "TSX", "DML": "TSX", "FM": "TSX", "SU": "TSX", "WCP": "TSX",
+    # OTC / Microcaps
+    "INND": "OTC", "PHIL": "OTC", "EEENF": "OTC", "AABB": "OTC", "TSNP": "OTC"
+}
+
+# ==========================================
 # NAVIGATION & SIDEBAR CONTROLS
 # ==========================================
 st.sidebar.title("🎯 Control Panel")
@@ -60,7 +80,7 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             for _, row in df.iterrows():
                 ticker_full = str(row.get('ticker', row.get('name', ''))).strip()
                 
-                # Strip out embedded exchange prefix if returned by screener
+                # Separate exchange prefix from pure symbol string
                 if ":" in ticker_full:
                     exchange, sym = ticker_full.split(":", 1)
                 else:
@@ -68,6 +88,10 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 
                 clean_sym = sym.replace(".TO", "").replace(".V", "").strip().upper()
                 clean_exch = exchange.strip().upper()
+
+                # Override with known exchange if screener misclassifies
+                if clean_sym in KNOWN_EXCHANGES:
+                    clean_exch = KNOWN_EXCHANGES[clean_sym]
 
                 results.append({
                     "Ticker": clean_sym,
@@ -86,16 +110,20 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
     """
     Comprehensive Multi-Exchange Resolver.
-    Sweeps NASDAQ, NYSE, AMEX, OTC, TSX, and TSXV until valid indicator data is found.
+    Sweeps NASDAQ, NYSE, AMEX, TSX, TSXV, and OTC until valid indicator data is found.
+    Never defaults to OTC for major equities.
     """
-    # Thoroughly clean symbol input from any passed prefixes or extensions
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
-    is_ca = ".TO" in symbol or symbol.endswith(".V") or symbol in ["BTE", "LUN", "ATH", "CVE", "ARX", "DML", "FM", "SU", "WCP"]
+    is_ca = ".TO" in symbol or symbol.endswith(".V") or symbol in KNOWN_EXCHANGES and KNOWN_EXCHANGES[symbol] in ["TSX", "TSXV"]
     
-    if is_ca:
+    # Priority exchange mapping
+    if clean_sym in KNOWN_EXCHANGES:
+        primary_exch = KNOWN_EXCHANGES[clean_sym]
+        screener_key = "canada" if primary_exch in ["TSX", "TSXV"] else "america"
+        exchanges_to_try = [(screener_key, primary_exch)]
+    elif is_ca:
         exchanges_to_try = [("canada", "TSX"), ("canada", "TSXV")]
     else:
-        # Sweeps all US exchange tiers including OTC Markets for penny/microcaps
         exchanges_to_try = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX"), ("america", "OTC")]
 
     for screener, exch in exchanges_to_try:
@@ -132,24 +160,28 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
                     "Ichimoku.BLine": float(row.get('Ichimoku.BLine', 1.0))
                 }
                 summary = {"RECOMMENDATION": "BUY" if float(row.get('RSI', 50)) > 50 else "SELL"}
-            return SyntheticAnalysis(), ("TSX" if is_ca else "OTC"), clean_sym
+            default_exch = KNOWN_EXCHANGES.get(clean_sym, "TSX" if is_ca else "NASDAQ")
+            return SyntheticAnalysis(), default_exch, clean_sym
     except Exception:
         pass
 
-    return None, ("TSX" if is_ca else "OTC"), clean_sym
+    default_exch = KNOWN_EXCHANGES.get(clean_sym, "TSX" if is_ca else "NASDAQ")
+    return None, default_exch, clean_sym
 
-def render_tradingview_widget(symbol="INND", exchange="OTC", interval_code="1"):
+def render_tradingview_widget(symbol="INTC", exchange="NASDAQ", interval_code="1"):
     """
     Renders TradingView's official interactive chart widget.
-    Guarantees clean prefix formatting without duplicate exchange namespaces.
+    Strictly forces verified exchange mapping and prevents false OTC prefixes.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     
-    # Auto-map known OTC microcaps if exchange was misclassified
-    if clean_sym in ["INND", "PHIL", "EEENF", "AABB", "TSNP", "SANW"]:
-        exchange = "OTC"
+    # Enforce correct exchange if symbol exists in static lookup dictionary
+    if clean_sym in KNOWN_EXCHANGES:
+        exchange = KNOWN_EXCHANGES[clean_sym]
+    elif not exchange or exchange == "OTC":
+        exchange = "NASDAQ" if ".TO" not in symbol else "TSX"
 
-    tv_symbol = f"{exchange}:{clean_sym}" if exchange else clean_sym
+    tv_symbol = f"{exchange}:{clean_sym}"
 
     tradingview_html = f"""
     <div class="tradingview-widget-container" style="height:550px;width:100%">
@@ -279,7 +311,7 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers (All US Market)":
         selected_exchange = exchange_lookup.get(selected_ticker, "NASDAQ")
     else:
         st.info("Market scanner refreshing... select or enter a ticker below.")
-        selected_ticker = "NVDA"
+        selected_ticker = "INTC"
         selected_exchange = "NASDAQ"
 
 elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
@@ -307,10 +339,9 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    # Clean manual ticker input directly upon entry
-    raw_input = st.text_input("Enter Ticker Symbol (e.g. INND, LABT, PANW, NVDA, AMD, TSLA, SU):", "INND").strip().upper()
+    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU):", "INTC").strip().upper()
     selected_ticker = raw_input.split(":")[-1].replace(".TO", "").replace(".V", "").strip()
-    selected_exchange = None
+    selected_exchange = KNOWN_EXCHANGES.get(selected_ticker, "NASDAQ")
 
 # ==========================================
 # QUANT ANALYSIS DISPLAY ENGINE
@@ -319,7 +350,8 @@ if selected_ticker:
     quant_setup, tv_code, active_exchange, clean_symbol = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
 
     if quant_setup:
-        final_exchange = active_exchange if active_exchange else "OTC"
+        # Enforce correct exchange from static lookup if present, otherwise active_exchange
+        final_exchange = KNOWN_EXCHANGES.get(clean_symbol, active_exchange if active_exchange else "NASDAQ")
         
         st.subheader(f"📊 Quantitative Indicator & Script Analysis: {clean_symbol} ({final_exchange})")
 
