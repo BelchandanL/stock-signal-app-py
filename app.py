@@ -38,41 +38,37 @@ trading_style = st.sidebar.selectbox(
 risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
 
 # ==========================================
-# TRADINGVIEW DATA ENGINE
+# RESILIENT TRADINGVIEW DATA ENGINE
 # ==========================================
 def fetch_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
-    """Fetches real-time TradingView technical analysis, oscillators, and moving averages."""
-    try:
-        clean_sym = symbol.replace(".TO", "")
-        exch = "TSX" if ".TO" in symbol else "NASDAQ"
-        scr = "canada" if ".TO" in symbol else "america"
+    """Dynamically checks across exchanges (NASDAQ, NYSE, AMEX, TSX, TSXV) to ensure reliable retrieval."""
+    clean_sym = symbol.replace(".TO", "").strip().upper()
+    
+    if ".TO" in symbol:
+        exchanges_to_check = [("canada", "TSX"), ("canada", "TSXV")]
+    else:
+        exchanges_to_check = [("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX")]
 
-        handler = TA_Handler(
-            symbol=clean_sym,
-            screener=scr,
-            exchange=exch,
-            interval=interval
-        )
-        return handler.get_analysis()
-    except Exception:
-        # Fallback to NYSE if NASDAQ fails for US stocks
-        if ".TO" not in symbol:
-            try:
-                handler = TA_Handler(
-                    symbol=symbol,
-                    screener="america",
-                    exchange="NYSE",
-                    interval=interval
-                )
-                return handler.get_analysis()
-            except Exception:
-                return None
-        return None
+    for screener, exchange in exchanges_to_check:
+        try:
+            handler = TA_Handler(
+                symbol=clean_sym,
+                screener=screener,
+                exchange=exchange,
+                interval=interval
+            )
+            analysis = handler.get_analysis()
+            if analysis and hasattr(analysis, 'indicators') and analysis.indicators:
+                return analysis, exchange
+        except Exception:
+            continue
 
-def render_tradingview_widget(symbol="AMD", interval_code="1"):
-    """Embeds TradingView's interactive widget directly using st.iframe."""
-    clean_sym = symbol.replace(".TO", "")
-    tv_symbol = f"TSX:{clean_sym}" if ".TO" in symbol else f"NASDAQ:{clean_sym}"
+    return None, None
+
+def render_tradingview_widget(symbol="AMD", exchange="NASDAQ", interval_code="1"):
+    """Embeds TradingView's interactive chart widget using verified exchange."""
+    clean_sym = symbol.replace(".TO", "").strip().upper()
+    tv_symbol = f"{exchange}:{clean_sym}"
 
     tradingview_html = f"""
     <div class="tradingview-widget-container" style="height:550px;width:100%">
@@ -95,7 +91,6 @@ def render_tradingview_widget(symbol="AMD", interval_code="1"):
       </script>
     </div>
     """
-    # Updated to st.iframe to replace deprecated st.components.v1.html
     st.iframe(tradingview_html, height=560)
 
 # ==========================================
@@ -110,10 +105,10 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     }
 
     tv_interval, tv_code = interval_map[style_name]
-    analysis = fetch_tv_analysis(ticker_symbol, interval=tv_interval)
+    analysis, active_exchange = fetch_tv_analysis(ticker_symbol, interval=tv_interval)
 
     if not analysis:
-        return None, tv_code
+        return None, tv_code, None
 
     inds = analysis.indicators
     summary = analysis.summary
@@ -126,7 +121,6 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     rsi = float(inds.get("RSI", 50.0))
     macd_val = float(inds.get("MACD.macd", 0.0))
     macd_signal = float(inds.get("MACD.signal", 0.0))
-    sma20 = float(inds.get("SMA20", price))
     ema20 = float(inds.get("EMA20", price))
     bb_upper = float(inds.get("BB.upper", price * 1.02))
     bb_lower = float(inds.get("BB.lower", price * 0.98))
@@ -135,8 +129,8 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     tv_rec = summary.get("RECOMMENDATION", "NEUTRAL")
     signal_direction = "BUY" if "BUY" in tv_rec else ("SELL" if "SELL" in tv_rec else "NEUTRAL")
 
-    # Quant Pine Script Approximations via TV Multi-Filters
-    smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= smc_block_check(price, low_price) else "Order Block Resistance (Bearish)"
+    # Quant Pine Script Approximations
+    smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= (low_price * 1.002) else "Order Block Resistance (Bearish)"
     lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in tv_rec) else "Bearish Feature Cluster"
     hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
 
@@ -158,6 +152,7 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
 
     quant_data = {
         "Ticker": ticker_symbol,
+        "Exchange": active_exchange,
         "Signal": signal_direction,
         "Price": price,
         "Entry": entry_price,
@@ -174,10 +169,7 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
         "Hull Suite": hull_trend
     }
 
-    return quant_data, tv_code
-
-def smc_block_check(price, low_price):
-    return low_price * 1.002
+    return quant_data, tv_code, active_exchange
 
 # ==========================================
 # SCREENER ENGINE
@@ -187,7 +179,7 @@ def scan_tickers(ticker_list, min_price=0.0, max_price=10000.0):
     results = []
     for sym in ticker_list:
         try:
-            analysis = fetch_tv_analysis(sym, interval=Interval.INTERVAL_1_DAY)
+            analysis, exchange = fetch_tv_analysis(sym, interval=Interval.INTERVAL_1_DAY)
             if not analysis:
                 continue
             inds = analysis.indicators
@@ -201,6 +193,7 @@ def scan_tickers(ticker_list, min_price=0.0, max_price=10000.0):
 
             results.append({
                 "Ticker": sym,
+                "Exchange": exchange,
                 "Price": price,
                 "Change %": change,
                 "Volume": volume,
@@ -228,8 +221,7 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers":
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
         disp["ATR"] = disp["ATR"].map(lambda x: f"${x:.2f}")
-        # Updated width="stretch" to replace use_container_width=True
-        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume", "ATR"]], width="stretch", hide_index=True)
+        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume", "ATR"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
         selected_ticker = "NVDA"
@@ -246,24 +238,23 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
         disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
-        # Updated width="stretch" to replace use_container_width=True
-        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume"]], width="stretch", hide_index=True)
+        st.dataframe(disp[["Ticker", "Exchange", "Price", "Change %", "Volume"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
         selected_ticker = "SOUN"
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. AMD, TSLA, SU.TO):", "AMD").strip().upper()
+    selected_ticker = st.text_input("Enter Ticker Symbol (e.g. NVDA, AMD, TSLA, SU.TO):", "NVDA").strip().upper()
 
 # ==========================================
 # QUANT ANALYSIS DISPLAY ENGINE
 # ==========================================
 if selected_ticker:
-    quant_setup, tv_code = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
+    quant_setup, tv_code, active_exchange = evaluate_quant_setup(selected_ticker, trading_style, risk_pct)
 
     if quant_setup:
-        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker}")
+        st.subheader(f"📊 Quantitative Indicator & Script Analysis: {selected_ticker} ({active_exchange})")
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Current Price", f"${quant_setup['Price']:.2f}")
@@ -279,7 +270,6 @@ if selected_ticker:
             "Supertrend / Bollinger": quant_setup["Supertrend / BB"],
             "Ichimoku Kijun Alignment": quant_setup["Ichimoku Kijun"]
         }])
-        # Updated width="stretch" to replace use_container_width=True
         st.dataframe(script_df, width="stretch", hide_index=True)
 
         st.subheader("🎯 Optimal Trade Setup Execution")
@@ -295,6 +285,6 @@ if selected_ticker:
             trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
         st.subheader(f"📈 Real-Time TradingView Interactive Chart: {selected_ticker}")
-        render_tradingview_widget(selected_ticker, interval_code=tv_code)
+        render_tradingview_widget(selected_ticker, exchange=active_exchange, interval_code=tv_code)
     else:
         st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Check ticker spelling or exchange listing.")
