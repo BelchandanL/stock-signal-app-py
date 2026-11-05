@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import streamlit.components.v1 as components
 from tradingview_ta import TA_Handler, Interval, Exchange
 
 st.set_page_config(page_title="Quant TradingView Dashboard", layout="wide")
@@ -71,7 +70,7 @@ def fetch_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE):
         return None
 
 def render_tradingview_widget(symbol="AMD", interval_code="1"):
-    """Embeds TradingView's interactive widget directly in the app."""
+    """Embeds TradingView's interactive widget directly using st.iframe."""
     clean_sym = symbol.replace(".TO", "")
     tv_symbol = f"TSX:{clean_sym}" if ".TO" in symbol else f"NASDAQ:{clean_sym}"
 
@@ -96,7 +95,8 @@ def render_tradingview_widget(symbol="AMD", interval_code="1"):
       </script>
     </div>
     """
-    components.html(tradingview_html, height=560)
+    # Updated to st.iframe to replace deprecated st.components.v1.html
+    st.iframe(tradingview_html, height=560)
 
 # ==========================================
 # ADVANCED QUANT & PINE SCRIPT SYNTHESIS
@@ -136,13 +136,8 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
     signal_direction = "BUY" if "BUY" in tv_rec else ("SELL" if "SELL" in tv_rec else "NEUTRAL")
 
     # Quant Pine Script Approximations via TV Multi-Filters
-    # 1. Smart Money Concepts (Liquidity Sweep / Order Block Filter)
     smc_filter = "Order Block Support (Bullish)" if price <= bb_lower or price <= smc_block_check(price, low_price) else "Order Block Resistance (Bearish)"
-    
-    # 2. Lorentzian Classification (Distance Feature Vector Proxy)
     lorentzian_signal = "Bullish Feature Cluster" if (rsi < 60 and macd_val > macd_signal and "BUY" in tv_rec) else "Bearish Feature Cluster"
-
-    # 3. Hull Suite (Trend Continuation)
     hull_trend = "Green Hull Alignment" if price > ema20 else "Red Hull Breakdown"
 
     # Stop & Target Calculation
@@ -153,14 +148,12 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance):
         stop_loss = entry_price - stop_distance
         target_1 = entry_price + (stop_distance * 1.5)
         target_2 = entry_price + (stop_distance * 3.0)
-        # Check if targets already hit in current session high
         targets_reached = high_price >= target_2
     else:
         entry_price = price
         stop_loss = entry_price + stop_distance
         target_1 = entry_price - (stop_distance * 1.5)
         target_2 = entry_price - (stop_distance * 3.0)
-        # Check if sell targets already hit in current session low
         targets_reached = low_price <= target_2
 
     quant_data = {
@@ -235,7 +228,8 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers":
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
         disp["ATR"] = disp["ATR"].map(lambda x: f"${x:.2f}")
-        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume", "ATR"]], use_container_width=True, hide_index=True)
+        # Updated width="stretch" to replace use_container_width=True
+        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume", "ATR"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
         selected_ticker = "NVDA"
@@ -252,7 +246,8 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
         disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
-        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume"]], use_container_width=True, hide_index=True)
+        # Updated width="stretch" to replace use_container_width=True
+        st.dataframe(disp[["Ticker", "Price", "Change %", "Volume"]], width="stretch", hide_index=True)
         selected_ticker = st.selectbox("Select Ticker for Quant Deep Dive:", movers_df["Ticker"].tolist())
     else:
         selected_ticker = "SOUN"
@@ -276,7 +271,6 @@ if selected_ticker:
         col3.metric("TradingView Regime", quant_setup['Signal'])
         col4.metric("Risk Percent", f"{risk_pct}%")
 
-        # Pine Script Analyzers Breakdown Table
         script_df = pd.DataFrame([{
             "Lorentzian Classification": quant_setup["Lorentzian Class"],
             "Smart Money Concepts (SMC)": quant_setup["SMC Structure"],
@@ -285,9 +279,9 @@ if selected_ticker:
             "Supertrend / Bollinger": quant_setup["Supertrend / BB"],
             "Ichimoku Kijun Alignment": quant_setup["Ichimoku Kijun"]
         }])
-        st.dataframe(script_df, use_container_width=True, hide_index=True)
+        # Updated width="stretch" to replace use_container_width=True
+        st.dataframe(script_df, width="stretch", hide_index=True)
 
-        # CONDITIONAL TRADE EXECUTION DISPLAY
         st.subheader("🎯 Optimal Trade Setup Execution")
 
         if quant_setup["Targets Reached"]:
@@ -300,7 +294,6 @@ if selected_ticker:
             trade_cols[3].metric("Target 1 (1.5x Risk)", f"${quant_setup['Target 1']:.2f}")
             trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
-        # LIVE TRADINGVIEW EMBEDDED CHART
         st.subheader(f"📈 Real-Time TradingView Interactive Chart: {selected_ticker}")
         render_tradingview_widget(selected_ticker, interval_code=tv_code)
     else:
