@@ -34,12 +34,12 @@ risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_
 # ==========================================
 # QUALITY-FILTERED MARKET SCANNER ENGINE
 # ==========================================
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=60)
 def scan_live_market(market="america", min_price=1.0, max_price=10000.0, limit=10):
     """
     Queries TradingView's backend scanner dynamically across US/CA markets.
-    Filters out sub-penny junk ($0.0001) by enforcing a $1.00 minimum price floor
-    and a $10M+ daily dollar liquidity threshold.
+    Uses balanced liquidity thresholds ($1.00+ price, $2M+ dollar volume)
+    so momentum movers load reliably during active trading hours.
     """
     try:
         q = (
@@ -48,8 +48,8 @@ def scan_live_market(market="america", min_price=1.0, max_price=10000.0, limit=1
             .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
             .where(
                 col('close').between(min_price, max_price),
-                col('volume') > 1000000,
-                col('value') > 10000000  # Minimum $10M total dollar volume traded
+                col('volume') > 250000,
+                col('value') > 2000000  # $2M minimum dollar volume threshold
             )
             .order_by('volume', ascending=False)
             .limit(limit)
@@ -307,8 +307,8 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
 selected_exchange = None
 
 if navigation_mode == "Scan Top 10 Heavy Volume Movers (Quality Equities)":
-    st.title("🔥 Top 10 Heavy Volume Movers (Liquid Quality Equities)")
-    st.caption("Filters out sub-penny noise: Enforces a $1.00+ price floor and $10M+ daily dollar liquidity.")
+    st.title("🔥 Top 10 Heavy Volume Movers (Quality Equities)")
+    st.caption("Filters out sub-penny noise: Enforces a $1.00+ price floor and $2M+ daily dollar liquidity.")
     
     movers_df = scan_live_market(market="america", min_price=1.0, limit=10)
     
