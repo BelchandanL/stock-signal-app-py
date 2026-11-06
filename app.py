@@ -3,7 +3,7 @@ import pandas as pd
 from tradingview_screener import Query, col
 from tradingview_ta import TA_Handler, Interval
 
-st.set_page_config(page_title="100% Dynamic Quant Trading Dashboard", layout="wide")
+st.set_page_config(page_title="Multi-Exchange All-Industry Quant Dashboard", layout="wide")
 
 # ==========================================
 # NAVIGATION & SIDEBAR CONTROLS
@@ -13,7 +13,7 @@ st.sidebar.title("🎯 Control Panel")
 navigation_mode = st.sidebar.radio(
     "Navigation Mode",
     [
-        "Scan Top 10 Heavy Volume Movers (Quality Equities)",
+        "Scan Top Heavy Movers (All North American Exchanges)",
         "Scan $5–$100 Momentum Stocks (US & CA)",
         "Manual Ticker Entry"
     ]
@@ -32,67 +32,74 @@ trading_style = st.sidebar.selectbox(
 risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
 
 # ==========================================
-# 100% DYNAMIC MARKET SCANNER ENGINE
+# MULTI-EXCHANGE & MULTI-INDUSTRY SCANNER
 # ==========================================
 @st.cache_data(ttl=60)
-def scan_live_market(market="america", min_price=1.0, max_price=10000.0, limit=10):
+def scan_all_exchanges(markets=["america", "canada"], min_price=1.0, max_price=10000.0, limit=10):
     """
-    Queries TradingView's backend scanner dynamically across US/CA markets.
-    Extracts the exact native exchange and pure ticker symbol with zero hardcoded lookup tables.
+    Queries TradingView backend across both US (NASDAQ, NYSE, AMEX) and Canadian (TSX, TSXV) markets.
+    Combines results and sorts by liquid market activity across all industries.
     """
-    for vol_min in [100000, 50000, 10000]:
-        try:
-            q = (
-                Query()
-                .set_markets(market)
-                .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
-                .where(
-                    col('close').between(min_price, max_price),
-                    col('volume') > vol_min
+    combined_results = []
+
+    for m in markets:
+        for vol_min in [100000, 50000, 10000]:
+            try:
+                q = (
+                    Query()
+                    .set_markets(m)
+                    .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
+                    .where(
+                        col('close').between(min_price, max_price),
+                        col('volume') > vol_min
+                    )
+                    .order_by('volume', ascending=False)
+                    .limit(limit)
                 )
-                .order_by('volume', ascending=False)
-                .limit(limit)
-            )
-            data = q.get_scanner_data()
-            
-            if data is not None and len(data) == 2 and not data[1].empty:
-                df = data[1]
-                results = []
-                for _, row in df.iterrows():
-                    raw_ticker = str(row.get('ticker', row.get('name', ''))).strip().upper()
-                    
-                    if ":" in raw_ticker:
-                        detected_exch, pure_sym = raw_ticker.split(":", 1)
-                    else:
-                        detected_exch = "NASDAQ" if market == "america" else "TSX"
-                        pure_sym = raw_ticker
+                data = q.get_scanner_data()
+                
+                if data is not None and len(data) == 2 and not data[1].empty:
+                    df = data[1]
+                    for _, row in df.iterrows():
+                        raw_ticker = str(row.get('ticker', row.get('name', ''))).strip().upper()
+                        
+                        if ":" in raw_ticker:
+                            detected_exch, pure_sym = raw_ticker.split(":", 1)
+                        else:
+                            detected_exch = "NASDAQ" if m == "america" else "TSX"
+                            pure_sym = raw_ticker
 
-                    clean_sym = pure_sym.replace(".TO", "").replace(".V", "").strip()
-                    clean_exch = detected_exch.strip()
+                        clean_sym = pure_sym.replace(".TO", "").replace(".V", "").strip()
+                        clean_exch = detected_exch.strip()
 
-                    results.append({
-                        "Ticker": clean_sym,
-                        "Exchange": clean_exch,
-                        "Price": float(row.get('close', 0.0)),
-                        "Change %": float(row.get('change', 0.0)),
-                        "Volume": int(row.get('volume', 0)),
-                        "RVOL": float(row.get('relative_volume_10d_calc', 1.0))
-                    })
-                return pd.DataFrame(results)
-        except Exception:
-            continue
+                        combined_results.append({
+                            "Ticker": clean_sym,
+                            "Exchange": clean_exch,
+                            "Price": float(row.get('close', 0.0)),
+                            "Change %": float(row.get('change', 0.0)),
+                            "Volume": int(row.get('volume', 0)),
+                            "RVOL": float(row.get('relative_volume_10d_calc', 1.0))
+                        })
+                    break  # Break threshold loop if query succeeds for this market
+            except Exception:
+                continue
+
+    if combined_results:
+        res_df = pd.DataFrame(combined_results)
+        # Deduplicate and sort by Volume across combined market payloads
+        res_df = res_df.drop_duplicates(subset=["Ticker", "Exchange"]).sort_values(by="Volume", ascending=False)
+        return res_df.head(limit)
 
     return pd.DataFrame()
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, preferred_exchange=None):
     """
     Dynamic Multi-Exchange Resolver.
-    Uses strictly passed or detected exchange attributes without relying on static dictionaries.
+    Checks NASDAQ, NYSE, AMEX, TSX, TSXV, and OTC dynamically without hardcoded assumptions.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     is_ca = ".TO" in symbol or symbol.endswith(".V") or preferred_exchange in ["TSX", "TSXV"]
     
-    # Dynamically build priority exchange sweep
     exchanges_to_try = []
     if preferred_exchange and preferred_exchange != "AUTO":
         screener_key = "canada" if preferred_exchange in ["TSX", "TSXV"] else "america"
@@ -103,7 +110,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
     else:
         exchanges_to_try.extend([("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX"), ("america", "OTC")])
 
-    # Deduplicate exchange sweep list
+    # Deduplicate sweep list
     seen = set()
     deduped_exchanges = []
     for item in exchanges_to_try:
@@ -162,7 +169,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
 
 def render_tradingview_widget(symbol, exchange, interval_code="1"):
     """
-    Renders TradingView's official interactive chart widget dynamically.
+    Renders TradingView's official interactive chart widget using the dynamically detected exchange.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     clean_exch = str(exchange).strip().upper() if exchange else "NASDAQ"
@@ -308,11 +315,11 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
 # ==========================================
 selected_exchange = None
 
-if navigation_mode == "Scan Top 10 Heavy Volume Movers (Quality Equities)":
-    st.title("🔥 Top 10 Heavy Volume Movers (Quality Equities)")
-    st.caption("Filters out sub-penny noise: Enforces a $1.00+ price floor and high liquidity thresholds.")
+if navigation_mode == "Scan Top Heavy Movers (All North American Exchanges)":
+    st.title("🔥 Top Heavy Volume Movers (NYSE, NASDAQ, AMEX, TSX, TSXV)")
+    st.caption("Cross-exchange aggregate scan covering Tech, Industrials, Energy, Financials, and Healthcare.")
     
-    movers_df = scan_live_market(market="america", min_price=1.0, limit=10)
+    movers_df = scan_all_exchanges(markets=["america", "canada"], min_price=1.0, limit=10)
     
     if not movers_df.empty:
         disp = movers_df.copy()
@@ -327,15 +334,21 @@ if navigation_mode == "Scan Top 10 Heavy Volume Movers (Quality Equities)":
         selected_exchange = exchange_lookup.get(selected_ticker)
     else:
         st.info("Market scanner refreshing... select or enter a ticker below.")
-        selected_ticker = "INTC"
+        selected_ticker = "NVDA"
         selected_exchange = "NASDAQ"
 
 elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
     st.title("💎 $5–$100 High Momentum Market Screener")
-    market_choice = st.radio("Target Market", ["US Market (NYSE/NASDAQ/AMEX)", "Canadian Market (TSX/TSXV)"], horizontal=True)
+    market_choice = st.radio("Target Market", ["All North American Markets (US & CA)", "US Market Only (NYSE/NASDAQ/AMEX)", "Canadian Market Only (TSX/TSXV)"], horizontal=True)
     
-    tv_market_key = "america" if "US" in market_choice else "canada"
-    movers_df = scan_live_market(market=tv_market_key, min_price=5.0, max_price=100.0, limit=10)
+    if "All" in market_choice:
+        target_mkts = ["america", "canada"]
+    elif "US" in market_choice:
+        target_mkts = ["america"]
+    else:
+        target_mkts = ["canada"]
+
+    movers_df = scan_all_exchanges(markets=target_mkts, min_price=5.0, max_price=100.0, limit=10)
 
     if not movers_df.empty:
         disp = movers_df.copy()
@@ -350,12 +363,12 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
         selected_exchange = exchange_lookup.get(selected_ticker)
     else:
         st.info("No stocks found matching exact filter criteria right now.")
-        selected_ticker = "SOUN" if "US" in market_choice else "BTE"
-        selected_exchange = "NASDAQ" if "US" in market_choice else "TSX"
+        selected_ticker = "SOUN"
+        selected_exchange = "NASDAQ"
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU, MU):", "INTC").strip().upper()
+    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU, BTE, XOM, JPM):", "NVDA").strip().upper()
     selected_ticker = raw_input.split(":")[-1].replace(".TO", "").replace(".V", "").strip()
     selected_exchange = None
 
