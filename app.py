@@ -13,7 +13,7 @@ st.sidebar.title("🎯 Control Panel")
 navigation_mode = st.sidebar.radio(
     "Navigation Mode",
     [
-        "Scan Top 10 Heavy Volume Movers (All US Market)",
+        "Scan Top 10 Heavy Volume Movers (Quality Equities)",
         "Scan $5–$100 Momentum Stocks (US & CA)",
         "Manual Ticker Entry"
     ]
@@ -32,13 +32,14 @@ trading_style = st.sidebar.selectbox(
 risk_pct = st.sidebar.slider("Stop Loss Risk Selector (%)", min_value=0.25, max_value=5.0, value=1.5, step=0.25)
 
 # ==========================================
-# DYNAMIC MARKET-WIDE SCANNER ENGINE
+# QUALITY-FILTERED MARKET SCANNER ENGINE
 # ==========================================
 @st.cache_data(ttl=120)
-def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=10):
+def scan_live_market(market="america", min_price=1.0, max_price=10000.0, limit=10):
     """
     Queries TradingView's backend scanner dynamically across US/CA markets.
-    Extracts the exact native exchange and pure ticker symbol.
+    Filters out sub-penny junk ($0.0001) by enforcing a $1.00 minimum price floor
+    and a $10M+ daily dollar liquidity threshold.
     """
     try:
         q = (
@@ -47,7 +48,8 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
             .select('name', 'close', 'change', 'volume', 'relative_volume_10d_calc')
             .where(
                 col('close').between(min_price, max_price),
-                col('volume') > 50000
+                col('volume') > 1000000,
+                col('value') > 10000000  # Minimum $10M total dollar volume traded
             )
             .order_by('volume', ascending=False)
             .limit(limit)
@@ -85,7 +87,7 @@ def scan_live_market(market="america", min_price=0.0, max_price=10000.0, limit=1
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, preferred_exchange=None):
     """
-    Dynamic Multi-Exchange Resolver for the 7 key indicators.
+    Dynamic Multi-Exchange Resolver for technical indicators.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     is_ca = ".TO" in symbol or symbol.endswith(".V")
@@ -158,7 +160,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
 
 def render_tradingview_widget(symbol, exchange, interval_code="1"):
     """
-    Renders TradingView's official interactive chart widget with volume and technical overlays.
+    Renders TradingView's official interactive chart widget using verified exchange.
     """
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
     clean_exch = str(exchange).strip().upper() if exchange else "NASDAQ"
@@ -223,38 +225,37 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
     rsi = float(inds.get("RSI", 50.0))
     rsi_state = "Oversold (<30)" if rsi <= 30 else ("Overbought (>70)" if rsi >= 70 else f"Neutral ({rsi:.1f})")
 
-    # 2. Moving Averages (EMA20 vs SMA50/SMA200)
+    # 2. Moving Averages (EMA20 vs SMA50)
     ema20 = float(inds.get("EMA20", price))
     sma50 = float(inds.get("SMA50", price))
     ma_trend = "Strong Uptrend (Price > EMA20 > SMA50)" if price > ema20 > sma50 else ("Downtrend Alignment" if price < ema20 else "Consolidation Range")
 
-    # 3. MACD (Line vs Signal)
+    # 3. MACD
     macd_val = float(inds.get("MACD.macd", 0.0))
     macd_signal = float(inds.get("MACD.signal", 0.0))
     macd_state = "Bullish Crossover" if macd_val > macd_signal else "Bearish Momentum"
 
-    # 4. Bollinger Bands (Upper, Lower, Width)
+    # 4. Bollinger Bands
     bb_upper = float(inds.get("BB.upper", price * 1.02 if price > 0 else 0.01))
     bb_lower = float(inds.get("BB.lower", price * 0.98 if price > 0 else 0.01))
     bb_pos = "Upper Band Squeeze" if price >= bb_upper else ("Lower Band Dip" if price <= bb_lower else "Mid-Band Channel")
 
-    # 5. Dynamic Fibonacci Retracement Levels
+    # 5. Dynamic Fibonacci Retracement
     diff = max(high - low, 0.0001)
-    fib_382 = high - (diff * 0.382)
     fib_500 = high - (diff * 0.500)
     fib_618 = high - (diff * 0.618)
     fib_state = f"50.0% Key Level: ${fib_500:.2f} (Golden Pocket: ${fib_618:.2f})"
 
-    # 6. Stochastic Oscillator (Stoch.K vs Stoch.D)
+    # 6. Stochastic Oscillator
     stoch_k = float(inds.get("Stoch.K", 50.0))
     stoch_d = float(inds.get("Stoch.D", 50.0))
     stoch_state = "Bullish Cross (%K > %D)" if stoch_k > stoch_d else "Bearish Cross (%K < %D)"
 
-    # 7. Volume Profile / Volume Weighted Value Area Proxy
+    # 7. Volume Profile (POC Proxy)
     vol_profile_poc = (high + low + price) / 3.0
     vol_state = f"POC Node Proxy: ${vol_profile_poc:.2f}"
 
-    # Regimes and Signals
+    # Signals & Recommendations
     tv_rec = str(summary.get("RECOMMENDATION", "NEUTRAL")).upper() if summary else "NEUTRAL"
     if "BUY" in tv_rec:
         signal_direction = "BUY"
@@ -305,15 +306,15 @@ def evaluate_quant_setup(ticker_symbol, style_name, risk_tolerance, preferred_ex
 # ==========================================
 selected_exchange = None
 
-if navigation_mode == "Scan Top 10 Heavy Volume Movers (All US Market)":
-    st.title("🔥 Top 10 Heavy Volume Movers (Dynamic US Market Scan)")
-    st.caption("Scans entire US stock market dynamically via TradingView official scanner.")
+if navigation_mode == "Scan Top 10 Heavy Volume Movers (Quality Equities)":
+    st.title("🔥 Top 10 Heavy Volume Movers (Liquid Quality Equities)")
+    st.caption("Filters out sub-penny noise: Enforces a $1.00+ price floor and $10M+ daily dollar liquidity.")
     
-    movers_df = scan_live_market(market="america", limit=10)
+    movers_df = scan_live_market(market="america", min_price=1.0, limit=10)
     
     if not movers_df.empty:
         disp = movers_df.copy()
-        disp["Price"] = disp["Price"].map(lambda x: f"${x:.4f}" if x < 1.0 else f"${x:.2f}")
+        disp["Price"] = disp["Price"].map(lambda x: f"${x:.2f}")
         disp["Change %"] = disp["Change %"].map(lambda x: f"{x:+.2f}%")
         disp["Volume"] = disp["Volume"].map(lambda x: f"{x:,}")
         disp["RVOL"] = disp["RVOL"].map(lambda x: f"{x:.2f}x")
@@ -352,7 +353,7 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU, INND):", "INTC").strip().upper()
+    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU):", "NVDA").strip().upper()
     selected_ticker = raw_input.split(":")[-1].replace(".TO", "").replace(".V", "").strip()
     selected_exchange = None
 
@@ -373,13 +374,12 @@ if selected_ticker:
         st.subheader(f"📊 7-Indicator Technical Matrix: {clean_symbol} ({final_exchange})")
 
         col1, col2, col3, col4 = st.columns(4)
-        price_fmt = f"${quant_setup['Price']:.4f}" if quant_setup['Price'] < 1.0 else f"${quant_setup['Price']:.2f}"
-        col1.metric("Current Price", price_fmt)
+        col1.metric("Current Price", f"${quant_setup['Price']:.2f}")
         col2.metric("TradingView Signal", quant_setup['Signal'])
         col3.metric("RSI State", quant_setup['RSI'])
         col4.metric("Risk Percent", f"{risk_pct}%")
 
-        # Render 7 Requested Technical Indicators Grid
+        # 7 Requested Technical Indicators Output Grid
         script_df = pd.DataFrame([{
             "1. RSI (14)": quant_setup["RSI"],
             "2. Moving Average (EMA/SMA)": quant_setup["MA Alignment"],
@@ -398,16 +398,10 @@ if selected_ticker:
         else:
             trade_cols = st.columns(5)
             trade_cols[0].metric("Action", quant_setup["Signal"])
-            
-            e_fmt = f"${quant_setup['Entry']:.4f}" if quant_setup['Entry'] < 1.0 else f"${quant_setup['Entry']:.2f}"
-            sl_fmt = f"${quant_setup['Stop Loss']:.4f}" if quant_setup['Stop Loss'] < 1.0 else f"${quant_setup['Stop Loss']:.2f}"
-            t1_fmt = f"${quant_setup['Target 1']:.4f}" if quant_setup['Target 1'] < 1.0 else f"${quant_setup['Target 1']:.2f}"
-            t2_fmt = f"${quant_setup['Target 2']:.4f}" if quant_setup['Target 2'] < 1.0 else f"${quant_setup['Target 2']:.2f}"
-
-            trade_cols[1].metric("Ideal Entry", e_fmt)
-            trade_cols[2].metric("Stop Loss", sl_fmt)
-            trade_cols[3].metric("Target 1 (1.5x Risk)", t1_fmt)
-            trade_cols[4].metric("Target 2 (3.0x Risk)", t2_fmt)
+            trade_cols[1].metric("Ideal Entry", f"${quant_setup['Entry']:.2f}")
+            trade_cols[2].metric("Stop Loss", f"${quant_setup['Stop Loss']:.2f}")
+            trade_cols[3].metric("Target 1 (1.5x Risk)", f"${quant_setup['Target 1']:.2f}")
+            trade_cols[4].metric("Target 2 (3.0x Risk)", f"${quant_setup['Target 2']:.2f}")
 
         st.subheader(f"📈 Real-Time Interactive Chart: {clean_symbol}")
         render_tradingview_widget(clean_symbol, exchange=final_exchange, interval_code=tv_code)
