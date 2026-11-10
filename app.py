@@ -89,11 +89,12 @@ def scan_all_exchanges(markets=["america", "canada"], min_price=1.0, max_price=1
 
 def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, preferred_exchange=None, fallback_price=None):
     """
-    Dynamic Multi-Exchange Resolver with robust table-data fallback.
-    Guarantees analysis loads even if TradingView TA servers lack indicator streams.
+    Dynamic Multi-Exchange Resolver with strict boundary enforcement.
+    Prevents cross-border fallbacks between Canadian (.TO/.V) and US equities.
     """
+    symbol_upper = symbol.upper()
+    is_ca = ".TO" in symbol_upper or symbol_upper.endswith(".V") or preferred_exchange in ["TSX", "TSXV"]
     clean_sym = symbol.split(":")[-1].replace(".TO", "").replace(".V", "").strip().upper()
-    is_ca = ".TO" in symbol or symbol.endswith(".V") or preferred_exchange in ["TSX", "TSXV"]
     
     exchanges_to_try = []
     if preferred_exchange and preferred_exchange != "AUTO":
@@ -101,6 +102,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
         exchanges_to_try.append((screener_key, preferred_exchange))
     
     if is_ca:
+        # Strictly Canadian exchanges, NO fallback to US markets for Canadian-designated symbols
         exchanges_to_try.extend([("canada", "TSX"), ("canada", "TSXV")])
     else:
         exchanges_to_try.extend([("america", "NASDAQ"), ("america", "NYSE"), ("america", "AMEX"), ("america", "OTC")])
@@ -126,7 +128,11 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
         except Exception:
             continue
 
-    # Resilient Synthetic Fallback utilizing table price data if available
+    # If it's explicitly Canadian and not found on TSX/TSXV, return None rather than crossing over to US
+    if is_ca:
+        return None, "TSX", clean_sym
+
+    # Resilient Synthetic Fallback for US equities
     base_price = fallback_price if fallback_price and fallback_price > 0 else 10.0
     class SyntheticAnalysis:
         indicators = {
@@ -146,7 +152,7 @@ def fetch_single_tv_analysis(symbol, interval=Interval.INTERVAL_1_MINUTE, prefer
         }
         summary = {"RECOMMENDATION": "NEUTRAL"}
 
-    default_exch = preferred_exchange if preferred_exchange else ("TSX" if is_ca else "NASDAQ")
+    default_exch = preferred_exchange if preferred_exchange else "NASDAQ"
     return SyntheticAnalysis(), default_exch, clean_sym
 
 def render_tradingview_widget(symbol, exchange, interval_code="1"):
@@ -341,9 +347,12 @@ elif navigation_mode == "Scan $5–$100 Momentum Stocks (US & CA)":
 
 else:
     st.title("⚡ Manual Ticker Quant Analyzer")
-    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, AMD, TSLA, SU, BTE, XOM, JPM):", "NVDA").strip().upper()
-    selected_ticker = raw_input.split(":")[-1].replace(".TO", "").replace(".V", "").strip()
-    selected_exchange = None
+    raw_input = st.text_input("Enter Ticker Symbol (e.g. INTC, LABT, PANW, NVDA, TSLA.TO, SU.TO, BTE):", "NVDA").strip().upper()
+    selected_ticker = raw_input.strip()
+    if ".TO" in selected_ticker or ".V" in selected_ticker:
+        selected_exchange = "TSX" if ".TO" in selected_ticker else "TSXV"
+    else:
+        selected_exchange = None
 
 # ==========================================
 # QUANT ANALYSIS DISPLAY ENGINE
@@ -394,4 +403,4 @@ if selected_ticker:
         st.subheader(f"📈 Real-Time Interactive Chart: {clean_symbol}")
         render_tradingview_widget(clean_symbol, exchange=final_exchange, interval_code=tv_code)
     else:
-        st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Please verify the ticker symbol.")
+        st.error(f"Could not load TradingView analysis for symbol: {selected_ticker}. Please verify the ticker symbol and exchange suffix.")
